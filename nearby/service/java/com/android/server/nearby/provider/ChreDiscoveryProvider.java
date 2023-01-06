@@ -136,7 +136,12 @@ public class ChreDiscoveryProvider extends AbstractDiscoveryProvider {
         }
     }
 
-    public boolean available() {
+    /**
+     * @return {@code true} if CHRE is available and {@code null} when CHRE availability result
+     * has not been returned
+     */
+    @Nullable
+    public Boolean available() {
         return mChreCommunication.available();
     }
 
