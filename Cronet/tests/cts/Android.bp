@@ -18,31 +18,65 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-android_test {
-    name: "CtsCronetTestCases",
-    compile_multilib: "both", // Include both the 32 and 64 bit versions
-    defaults: ["cts_defaults"],
+// cronet_test_java_defaults can be used to specify a java_defaults target that
+// either enables or disables Cronet tests. This is used to disable Cronet
+// tests on tm-mainline-prod where the required APIs are not present.
+cronet_test_java_defaults = "CronetTestJavaDefaultsEnabled"
+// This is a placeholder comment to avoid merge conflicts
+// as cronet_test_java_defaults may have different values
+// depending on the branch
+
+java_defaults {
+    name: "CronetTestJavaDefaultsEnabled",
+    enabled: true,
+}
+
+java_defaults {
+    name: "CronetTestJavaDefaultsDisabled",
+    enabled: false,
+}
+
+java_defaults {
+    name: "CronetTestJavaDefaults",
+    defaults: [cronet_test_java_defaults],
+}
+
+android_library {
+    name: "CtsNetHttpTestsLib",
     sdk_version: "test_current",
     srcs: [
         "src/**/*.java",
         "src/**/*.kt",
     ],
     static_libs: [
+        "androidx.test.ext.junit",
         "androidx.test.rules",
         "androidx.core_core",
         "ctstestrunner-axt",
         "ctstestserver",
         "junit",
+        "hamcrest-library",
+        "kotlin-test",
     ],
     libs: [
         "android.test.runner",
         "android.test.base",
         "android.test.mock",
         "androidx.annotation_annotation",
-        "framework-cronet",
+        "framework-tethering",
         "org.apache.http.legacy",
     ],
+}
 
+android_test {
+    name: "CtsNetHttpTestCases",
+    defaults: [
+        "cts_defaults",
+        "CronetTestJavaDefaults",
+    ],
+    sdk_version: "test_current",
+    compile_multilib: "both", // Include both the 32 and 64 bit versions
+    static_libs: ["CtsNetHttpTestsLib"],
     // Tag this as a cts test artifact
     test_suites: [
         "cts",

@@ -37,6 +37,7 @@ import android.nearby.INearbyManager;
 import android.nearby.IScanListener;
 import android.nearby.NearbyManager;
 import android.nearby.ScanRequest;
+import android.nearby.aidl.IOffloadCallback;
 import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
@@ -108,10 +109,7 @@ public class NearbyService extends INearbyManager.Stub {
         CallerIdentity identity = CallerIdentity.fromBinder(mContext, packageName, attributionTag);
         DiscoveryPermissions.enforceDiscoveryPermission(mContext, identity);
 
-        if (mProviderManager.registerScanListener(scanRequest, listener, identity)) {
-            return NearbyManager.ScanStatus.SUCCESS;
-        }
-        return NearbyManager.ScanStatus.ERROR;
+        return mProviderManager.registerScanListener(scanRequest, listener, identity);
     }
 
     @Override
@@ -146,6 +144,11 @@ public class NearbyService extends INearbyManager.Stub {
         BroadcastPermissions.enforceBroadcastPermission(mContext, identity);
 
         mBroadcastProviderManager.stopBroadcast(listener);
+    }
+
+    @Override
+    public void queryOffloadCapability(IOffloadCallback callback) {
+
     }
 
     /**

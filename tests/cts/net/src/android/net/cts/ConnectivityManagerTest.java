@@ -96,6 +96,7 @@ import static com.android.net.module.util.NetworkStackConstants.TEST_CAPTIVE_POR
 import static com.android.net.module.util.NetworkStackConstants.TEST_CAPTIVE_PORTAL_HTTP_URL;
 import static com.android.networkstack.apishim.ConstantsShim.BLOCKED_REASON_LOCKDOWN_VPN;
 import static com.android.networkstack.apishim.ConstantsShim.BLOCKED_REASON_NONE;
+import static com.android.networkstack.apishim.ConstantsShim.RECEIVER_EXPORTED;
 import static com.android.testutils.Cleanup.testAndCleanup;
 import static com.android.testutils.DevSdkIgnoreRuleKt.SC_V2;
 import static com.android.testutils.MiscAsserts.assertThrows;
@@ -1131,18 +1132,16 @@ public class ConnectivityManagerTest {
 
         final ConnectivityActionReceiver receiver = new ConnectivityActionReceiver(
                 mCm, ConnectivityManager.TYPE_WIFI, NetworkInfo.State.CONNECTED);
-        mContext.registerReceiver(receiver, filter);
+        final int flags = SdkLevel.isAtLeastT() ? RECEIVER_EXPORTED : 0;
+        mContext.registerReceiver(receiver, filter, flags);
 
         // Create a broadcast PendingIntent for NETWORK_CALLBACK_ACTION.
         final Intent intent = new Intent(NETWORK_CALLBACK_ACTION)
                 .setPackage(mContext.getPackageName());
         // While ConnectivityService would put extra info such as network or request id before
         // broadcasting the inner intent. The MUTABLE flag needs to be added accordingly.
-        // TODO: replace with PendingIntent.FLAG_MUTABLE when this code compiles against S+ or
-        //  shims.
-        final int pendingIntentFlagMutable = 1 << 25;
         final PendingIntent pendingIntent = PendingIntent.getBroadcast(mContext, 0 /*requestCode*/,
-                intent, PendingIntent.FLAG_CANCEL_CURRENT | pendingIntentFlagMutable);
+                intent, PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_MUTABLE);
 
         // We will register for a WIFI network being available or lost.
         mCm.registerNetworkCallback(makeWifiNetworkRequest(), pendingIntent);
@@ -1182,14 +1181,13 @@ public class ConnectivityManagerTest {
         // Avoid receiving broadcasts from other runs by appending a timestamp
         final String broadcastAction = NETWORK_CALLBACK_ACTION + System.currentTimeMillis();
         try {
-            // TODO: replace with PendingIntent.FLAG_MUTABLE when this code compiles against S+
             // Intent is mutable to receive EXTRA_NETWORK_REQUEST from ConnectivityService
-            final int pendingIntentFlagMutable = 1 << 25;
             final String extraBoolKey = "extra_bool";
             firstIntent = PendingIntent.getBroadcast(mContext,
                     0 /* requestCode */,
-                    new Intent(broadcastAction).putExtra(extraBoolKey, false),
-                    PendingIntent.FLAG_UPDATE_CURRENT | pendingIntentFlagMutable);
+                    new Intent(broadcastAction).putExtra(extraBoolKey, false)
+                            .setPackage(mContext.getPackageName()),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
 
             if (useListen) {
                 mCm.registerNetworkCallback(firstRequest, firstIntent);
@@ -1201,8 +1199,9 @@ public class ConnectivityManagerTest {
             // intent will be updated with the new extras
             secondIntent = PendingIntent.getBroadcast(mContext,
                     0 /* requestCode */,
-                    new Intent(broadcastAction).putExtra(extraBoolKey, true),
-                    PendingIntent.FLAG_UPDATE_CURRENT | pendingIntentFlagMutable);
+                    new Intent(broadcastAction).putExtra(extraBoolKey, true)
+                            .setPackage(mContext.getPackageName()),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
 
             // Because secondIntent.intentFilterEquals the first, the request should be replaced
             if (useListen) {
@@ -1225,7 +1224,8 @@ public class ConnectivityManagerTest {
                     networkFuture.complete(intent.getParcelableExtra(EXTRA_NETWORK));
                 }
             };
-            mContext.registerReceiver(receiver, filter);
+            final int flags = SdkLevel.isAtLeastT() ? RECEIVER_EXPORTED : 0;
+            mContext.registerReceiver(receiver, filter, flags);
 
             final Network wifiNetwork = mCtsNetUtils.ensureWifiConnected();
             try {
@@ -2385,13 +2385,13 @@ public class ConnectivityManagerTest {
         }
         public void eventuallyExpectBlockedStatusCallback(Network network, int blockedStatus) {
             super.eventuallyExpect(CallbackEntry.BLOCKED_STATUS_INT, NETWORK_CALLBACK_TIMEOUT_MS,
-                    (it) -> it.getNetwork().equals(network) && it.getBlocked() == blockedStatus);
+                    (it) -> it.getNetwork().equals(network) && it.getReason() == blockedStatus);
         }
         public void onBlockedStatusChanged(Network network, int blockedReasons) {
             getHistory().add(new CallbackEntry.BlockedStatusInt(network, blockedReasons));
         }
         private void assertNoBlockedStatusCallback() {
-            super.assertNoCallbackThat(NO_CALLBACK_TIMEOUT_MS,
+            super.assertNoCallback(NO_CALLBACK_TIMEOUT_MS,
                     c -> c instanceof CallbackEntry.BlockedStatus);
         }
     }
@@ -2979,7 +2979,7 @@ public class ConnectivityManagerTest {
             defaultCb.eventuallyExpect(CallbackEntry.AVAILABLE, NETWORK_CALLBACK_TIMEOUT_MS,
                     entry -> cellNetwork.equals(entry.getNetwork()));
             // The network should not validate again.
-            wifiCb.assertNoCallbackThat(NO_CALLBACK_TIMEOUT_MS, c -> isValidatedCaps(c));
+            wifiCb.assertNoCallback(NO_CALLBACK_TIMEOUT_MS, c -> isValidatedCaps(c));
         } finally {
             resetAvoidBadWifi(previousAvoidBadWifi);
             mHttpServer.stop();
@@ -3151,7 +3151,7 @@ public class ConnectivityManagerTest {
      */
     private void assertNoCallbackExceptCapOrLpChange(
             @NonNull final TestableNetworkCallback cb) {
-        cb.assertNoCallbackThat(NO_CALLBACK_TIMEOUT_MS,
+        cb.assertNoCallback(NO_CALLBACK_TIMEOUT_MS,
                 c -> !(c instanceof CallbackEntry.CapabilitiesChanged
                         || c instanceof CallbackEntry.LinkPropertiesChanged));
     }

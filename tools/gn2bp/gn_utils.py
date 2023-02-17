@@ -78,7 +78,7 @@ def label_to_target_name_with_path(label):
   return name
 
 def _is_java_source(src):
-  return os.path.splitext(src)[1] == '.java' and not src.startswith("//out/test/gen/")
+  return os.path.splitext(src)[1] == '.java' and not src.startswith("//out/")
 
 def is_java_action(script, outputs):
   return (script != "" and script not in JAVA_BANNED_SCRIPTS) and any(
@@ -119,6 +119,7 @@ class GnParser(object):
         self.deps = set()
         self.transitive_static_libs_deps = set()
         self.source_set_deps = set()
+        self.ldflags = set()
 
         # These are valid only for type == 'action'
         self.inputs = set()
@@ -207,7 +208,7 @@ class GnParser(object):
                   'libs', 'proto_paths'):
         self.__dict__[key].update(other.__dict__.get(key, []))
 
-      for key_in_arch in ('cflags', 'defines', 'include_dirs', 'source_set_deps'):
+      for key_in_arch in ('cflags', 'defines', 'include_dirs', 'source_set_deps', 'ldflags'):
         self.arch[arch].__dict__[key_in_arch].update(
           other.arch[arch].__dict__.get(key_in_arch, []))
 
@@ -250,7 +251,7 @@ class GnParser(object):
         return
 
       for key in ('sources', 'cflags', 'defines', 'include_dirs', 'deps', 'source_set_deps',
-                  'inputs', 'outputs', 'args', 'script', 'response_file_contents'):
+                  'inputs', 'outputs', 'args', 'script', 'response_file_contents', 'ldflags'):
         self._finalize_attribute(key)
 
 
@@ -392,7 +393,7 @@ class GnParser(object):
 
     target.arch[arch].cflags.update(desc.get('cflags', []) + desc.get('cflags_cc', []))
     target.libs.update(desc.get('libs', []))
-    target.ldflags.update(desc.get('ldflags', []))
+    target.arch[arch].ldflags.update(desc.get('ldflags', []))
     target.arch[arch].defines.update(desc.get('defines', []))
     target.arch[arch].include_dirs.update(desc.get('include_dirs', []))
     target.output_name = desc.get('output_name', None)

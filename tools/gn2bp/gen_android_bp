@@ -126,14 +126,43 @@ cflag_allowlist = [
   "-msse3",
   # needed for zlib:zlib
   "-msse4.2",
+  # flags to reduce binary size
+  "-O1",
+  "-O2",
+  "-O3",
+  "-Oz",
+  "-g1",
+  "-g2",
+  "-fdata-sections",
+  "-ffunction-sections",
+  "-fvisibility=hidden",
+  "-fvisibility-inlines-hidden",
+  "-fstack-protector",
+  "-mno-outline",
+  "-mno-outline-atomics",
+  "-fno-asynchronous-unwind-tables",
+  "-fno-unwind-tables",
 ]
+
+# Linker flags which are passed through to the blueprint.
+ldflag_allowlist = [
+  # flags to reduce binary size
+  "-Wl,--as-needed",
+  "-Wl,--gc-sections",
+  "-Wl,--icf=all",
+]
+
+def get_linker_script_ldflag(script_path):
+  return f'-Wl,--script,{tree_path}/{script_path}'
 
 # Additional arguments to apply to Android.bp rules.
 additional_args = {
     # TODO: remove if not needed.
     'cronet_aml_components_cronet_android_cronet': [
-        ('linker_scripts', {
-            'base/android/library_loader/anchor_functions.lds',
+        # linker_scripts property is not available in tm-mainline-prod.
+        # So use ldflags to specify linker script.
+        ('ldflags',{
+          get_linker_script_ldflag('base/android/library_loader/anchor_functions.lds'),
         }),
     ],
     'cronet_aml_net_net': [
@@ -291,6 +320,7 @@ class Target(object):
     self.export_system_include_dirs = set()
     self.generated_headers = set()
     self.export_generated_headers = set()
+    self.ldflags = set()
 
   def to_string(self, output):
     nested_out = []
@@ -308,6 +338,7 @@ class Target(object):
     self._output_field(nested_out, 'export_system_include_dirs')
     self._output_field(nested_out, 'generated_headers')
     self._output_field(nested_out, 'export_generated_headers')
+    self._output_field(nested_out, 'ldflags')
 
     if nested_out:
       output.append('    %s: {' % self.name)
@@ -370,6 +401,7 @@ class Module(object):
     self.min_sdk_version = None
     self.proto = dict()
     self.linker_scripts = set()
+    self.ldflags = set()
     # The genrule_XXX below are properties that must to be propagated back
     # on the module(s) that depend on the genrule.
     self.genrule_headers = set()
@@ -391,6 +423,9 @@ class Module(object):
     self.processor_class = None
     self.sdk_version = None
     self.javacflags = set()
+    self.license_kinds = set()
+    self.license_text = set()
+    self.default_applicable_licenses = set()
 
   def to_string(self, output):
     if self.comment:
@@ -437,6 +472,7 @@ class Module(object):
     self._output_field(output, 'stubs')
     self._output_field(output, 'proto')
     self._output_field(output, 'linker_scripts')
+    self._output_field(output, 'ldflags')
     self._output_field(output, 'cppflags')
     self._output_field(output, 'libs')
     self._output_field(output, 'stem')
@@ -446,6 +482,9 @@ class Module(object):
     self._output_field(output, 'processor_class')
     self._output_field(output, 'sdk_version')
     self._output_field(output, 'javacflags')
+    self._output_field(output, 'license_kinds')
+    self._output_field(output, 'license_text')
+    self._output_field(output, 'default_applicable_licenses')
     if self.rtti:
       self._output_field(output, 'rtti')
 
@@ -749,7 +788,7 @@ def create_gcc_preprocess_modules(blueprint, target):
   module.out.add(stem + '.srcjar')
   module.cmd = NEWLINE.join([
     f'cp $(in) $(genDir)/{stem}.java &&',
-    f'$(location soong_zip) -o $(out) -srcjar -f $(genDir)/{stem}.java'
+    f'$(location soong_zip) -o $(out) -srcjar -C $(genDir) -f $(genDir)/{stem}.java'
   ])
   module.tools.add('soong_zip')
   blueprint.add_module(module)
@@ -956,12 +995,13 @@ class JniGeneratorSanitizer(BaseActionSanitizer):
   def _sanitize_args(self):
     self._set_value_arg('--jar_file', '$(location :current_android_jar)', False)
     if self._has_arg('--jar_file'):
-      self._append_arg('--javap', '$$(find out/.path -name javap)')
+      self._append_arg('--javap', '$$(find $${OUT_DIR:-out}/.path -name javap)')
     self._update_value_arg('--output_dir', self._sanitize_filepath)
     self._update_value_arg('--includes', self._sanitize_filepath, False)
     self._delete_value_arg('--prev_output_dir', False)
     self._update_list_arg('--input_file', self._sanitize_filepath)
     self._update_list_arg('--input_file', self._add_location_tag_to_filepath)
+    self._append_arg('--package_prefix', 'android.net.http.internal')
     super()._sanitize_args()
 
   def _sanitize_outputs(self):
@@ -992,6 +1032,7 @@ class JniRegistrationGeneratorSanitizer(BaseActionSanitizer):
     # update_jni_registration_module removes them from the srcs of the module
     # It might be better to remove sources by '--sources-exclusions'
     self._delete_value_arg('--sources-exclusions')
+    self._append_arg('--package_prefix', 'android.net.http.internal')
     super()._sanitize_args()
 
   def get_cmd(self):
@@ -1227,8 +1268,10 @@ def _get_cflags(cflags, defines):
   cflags |= set("-D%s" % define.replace("\"", "\\\"") for define in defines)
   return cflags
 
-def set_module_flags(module, cflags, defines):
+def set_module_flags(module, module_type, cflags, defines, ldflags):
   module.cflags.update(_get_cflags(cflags, defines))
+  if module_type != 'cc_object':
+    module.ldflags.update({flag for flag in ldflags if flag in ldflag_allowlist})
   # TODO: implement proper cflag parsing.
   for flag in cflags:
     if '-std=' in flag:
@@ -1247,8 +1290,7 @@ def set_module_include_dirs(module, cflags, include_dirs):
   # aosp / soong builds and b) the include directory should already be
   # configured via library dependency.
   module.local_include_dirs.update([gn_utils.label_to_path(d)
-                                 for d in include_dirs
-                                 if not re.match('^//out/.*', d)])
+                                 for d in include_dirs if not d.startswith('//out')])
   # Remove prohibited include directories
   module.local_include_dirs = [d for d in module.local_include_dirs
                                if d not in local_include_dirs_denylist]
@@ -1310,26 +1352,23 @@ def create_modules_from_target(blueprint, gn, gn_target_name):
 
   blueprint.add_module(module)
   module.init_rc = target_initrc.get(target.name, [])
-  module.srcs.update(
-      gn_utils.label_to_path(src)
-      for src in target.sources
-      if is_supported_source_file(src) and not src.startswith("//out/test"))
+  module.srcs.update(gn_utils.label_to_path(src)
+                     for src in target.sources if is_supported_source_file(src))
 
   # Add arch-specific properties
   for arch_name, arch in target.arch.items():
-    module.target[arch_name].srcs.update(
-      gn_utils.label_to_path(src)
-      for src in arch.sources
-      if is_supported_source_file(src) and not src.startswith("//out/test"))
+    module.target[arch_name].srcs.update(gn_utils.label_to_path(src)
+                                         for src in arch.sources if is_supported_source_file(src))
 
   module.rtti = target.rtti
 
   if target.type in gn_utils.LINKER_UNIT_TYPES:
-    set_module_flags(module, target.cflags, target.defines)
+    set_module_flags(module, module.type, target.cflags, target.defines, target.ldflags)
     set_module_include_dirs(module, target.cflags, target.include_dirs)
     # TODO: set_module_xxx is confusing, apply similar function to module and target in better way.
     for arch_name, arch in target.arch.items():
-      set_module_flags(module.target[arch_name], arch.cflags, arch.defines)
+      set_module_flags(module.target[arch_name], module.type,
+                       arch.cflags, arch.defines, arch.ldflags)
       # -Xclang -target-feature -Xclang +mte are used to enable MTE (Memory Tagging Extensions).
       # Flags which does not start with '-' could not be in the cflags so enabling MTE by
       # -march and -mcpu Feature Modifiers. MTE is only available on arm64. This is needed for
@@ -1519,19 +1558,20 @@ def create_java_module(blueprint, gn):
   module.libs = {
     "androidx.annotation_annotation",
     "jsr305",
-    "androidx.core_core-nodeps",
-    "androidx.collection_collection",
     "androidx.annotation_annotation-experimental-nodeps",
-    "android-support-multidex",
     "framework-connectivity.stubs.module_lib",
     "framework-connectivity-t.stubs.module_lib",
     "framework-tethering.stubs.module_lib",
     "framework-wifi.stubs.module_lib",
     "framework-mediaprovider.stubs.module_lib",
   }
+  module.static_libs = {
+    "modules-utils-build_system",
+  }
   module.aidl["include_dirs"] = {"frameworks/base/core/java/"}
   module.aidl["local_include_dirs"] = {"base/android/java/src/"}
   module.sdk_version = "module_current"
+  module.min_sdk_version = 30
   module.apex_available.add(tethering_apex)
   # TODO: support for this flag is removed upstream in crrev/c/4062652.
   # Consider reverting this change upstream, or worst-case downstream.  As an
@@ -1539,8 +1579,7 @@ def create_java_module(blueprint, gn):
   # would be less likely to conflict with upstream changes if the revert is not
   # accepted.
   module.javacflags.add("-Aorg.chromium.chrome.skipGenJni")
-  # TODO: remove following workaround required to make this module visible to make (b/203203405)
-  module.apex_available.add("//apex_available:platform")
+  module.javacflags.add("-Apackage_prefix=android.net.http.internal")
   for dep in get_non_api_java_actions(gn):
     target = gn.get_target(dep)
     if target.script == '//build/android/gyp/gcc_preprocess.py':
@@ -1554,8 +1593,12 @@ def create_java_module(blueprint, gn):
 
 def create_java_api_module(blueprint, gn):
   source_module = Module('filegroup', module_prefix + 'api_sources', java_api_target_name)
+  # TODO add the API helpers separately after the main API is checked in and thoroughly reviewed
   source_module.srcs.update([gn_utils.label_to_path(source)
-                             for source in get_api_java_sources(gn)])
+                             for source in get_api_java_sources(gn)
+                             if "apihelpers" not in source])
+  source_module.comment += "\n// TODO(danstahr): add the API helpers separately after the main" \
+                           " API is checked in and thoroughly reviewed"
   source_module.srcs.update([
     ':' + create_action_module(blueprint, gn.get_target(dep), 'java_genrule').name
     for dep in get_api_java_actions(gn)])
@@ -1566,6 +1609,7 @@ def create_java_api_module(blueprint, gn):
   java_module.sdk_version = "module_current"
   java_module.libs = {
       "androidx.annotation_annotation",
+      "framework-annotations-lib",
     }
   blueprint.add_module(java_module)
   return java_module
@@ -1592,11 +1636,8 @@ def create_blueprint_for_targets(gn, targets):
       '-Wno-sign-promo',
       '-Wno-unused-parameter',
       '-Wno-null-pointer-subtraction', # Needed to libevent
-      '-Wno-deprecated-non-prototype', # needed for zlib
-      '-fvisibility=hidden',
       '-Wno-ambiguous-reversed-operator', # needed for icui18n
       '-Wno-unreachable-code-loop-increment', # needed for icui18n
-      '-O2',
       '-fPIC',
   ]
   # Chromium builds do not add a dependency for headers found inside the
@@ -1650,6 +1691,55 @@ def create_blueprint_for_targets(gn, targets):
 
   return blueprint
 
+def create_license_module(blueprint):
+  module = Module("license", "external_cronet_license", "LICENSE")
+  module.license_kinds.update({
+      'SPDX-license-identifier-MPL',
+      'SPDX-license-identifier-MPL-1.1',
+      'SPDX-license-identifier-ISC',
+      'SPDX-license-identifier-AFL-2.0',
+      'SPDX-license-identifier-MPL-2.0',
+      'SPDX-license-identifier-BSD',
+      'SPDX-license-identifier-Apache-2.0',
+      'SPDX-license-identifier-BSL-1.0',
+      'SPDX-license-identifier-Unicode-DFS',
+      'SPDX-license-identifier-NCSA',
+      'SPDX-license-identifier-OpenSSL',
+      'SPDX-license-identifier-MIT',
+      "SPDX-license-identifier-ICU",
+      'legacy_unencumbered',
+  })
+  module.license_text.update({
+      "LICENSE",
+      "net/third_party/uri_template/LICENSE",
+      "net/third_party/quiche/src/LICENSE",
+      "base/third_party/symbolize/LICENSE",
+      "base/third_party/superfasthash/LICENSE",
+      "base/third_party/xdg_user_dirs/LICENSE",
+      "base/third_party/double_conversion/LICENSE",
+      "base/third_party/nspr/LICENSE",
+      "base/third_party/dynamic_annotations/LICENSE",
+      "base/third_party/icu/LICENSE",
+      "base/third_party/valgrind/LICENSE",
+      "third_party/brotli/LICENSE",
+      "third_party/protobuf/LICENSE",
+      "third_party/protobuf/third_party/utf8_range/LICENSE",
+      "third_party/metrics_proto/LICENSE",
+      "third_party/boringssl/src/LICENSE",
+      "third_party/boringssl/src/third_party/googletest/LICENSE",
+      "third_party/boringssl/src/third_party/wycheproof_testvectors/LICENSE",
+      "third_party/boringssl/src/third_party/fiat/LICENSE",
+      "third_party/libevent/LICENSE",
+      "third_party/ashmem/LICENSE",
+      "third_party/icu/LICENSE",
+      "third_party/icu/scripts/LICENSE",
+      "third_party/abseil-cpp/LICENSE",
+      "third_party/modp_b64/LICENSE",
+  })
+  default_license = Module("package", "", "PACKAGE")
+  default_license.default_applicable_licenses.add(module.name)
+  blueprint.add_module(module)
+  blueprint.add_module(default_license)
 
 def main():
   parser = argparse.ArgumentParser(
@@ -1701,7 +1791,7 @@ def main():
   # Add any proto groups to the blueprint.
   for l_name, t_names in proto_groups.items():
     create_proto_group_modules(blueprint, gn, l_name, t_names)
-
+  create_license_module(blueprint)
   output = [
       """// Copyright (C) 2022 The Android Open Source Project
 //

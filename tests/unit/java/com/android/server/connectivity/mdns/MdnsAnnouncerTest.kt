@@ -22,13 +22,11 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import com.android.internal.util.HexDump
 import com.android.server.connectivity.mdns.MdnsAnnouncer.AnnouncementInfo
+import com.android.server.connectivity.mdns.MdnsAnnouncer.BaseAnnouncementInfo
+import com.android.server.connectivity.mdns.MdnsRecordRepository.getReverseDnsAddress
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
 import java.net.DatagramPacket
-import java.net.Inet6Address
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.MulticastSocket
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import org.junit.After
@@ -38,6 +36,7 @@ import org.junit.runner.RunWith
 import org.mockito.ArgumentCaptor
 import org.mockito.Mockito.any
 import org.mockito.Mockito.atLeast
+import org.mockito.Mockito.doReturn
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.timeout
 import org.mockito.Mockito.verify
@@ -47,19 +46,17 @@ private const val FIRST_ANNOUNCES_COUNT = 2
 private const val NEXT_ANNOUNCES_DELAY = 1L
 private const val TEST_TIMEOUT_MS = 1000L
 
-private val destinationsSupplier = {
-    listOf(InetSocketAddress(MdnsConstants.getMdnsIPv6Address(), MdnsConstants.MDNS_PORT)) }
-
 @RunWith(DevSdkIgnoreRunner::class)
 @IgnoreUpTo(Build.VERSION_CODES.S_V2)
 class MdnsAnnouncerTest {
 
     private val thread = HandlerThread(MdnsAnnouncerTest::class.simpleName)
-    private val socket = mock(MulticastSocket::class.java)
+    private val socket = mock(MdnsInterfaceSocket::class.java)
     private val buffer = ByteArray(1500)
 
     @Before
     fun setUp() {
+        doReturn(true).`when`(socket).hasJoinedIpv6()
         thread.start()
     }
 
@@ -71,8 +68,7 @@ class MdnsAnnouncerTest {
     private class TestAnnouncementInfo(
         announcedRecords: List<MdnsRecord>,
         additionalRecords: List<MdnsRecord>
-    )
-        : AnnouncementInfo(announcedRecords, additionalRecords, destinationsSupplier) {
+    ) : AnnouncementInfo(1 /* serviceId */, announcedRecords, additionalRecords) {
         override fun getDelayMs(nextIndex: Int) =
                 if (nextIndex < FIRST_ANNOUNCES_COUNT) {
                     FIRST_ANNOUNCES_DELAY
@@ -83,10 +79,10 @@ class MdnsAnnouncerTest {
 
     @Test
     fun testAnnounce() {
-        val replySender = MdnsReplySender(thread.looper, socket, buffer)
+        val replySender = MdnsReplySender("testiface", thread.looper, socket, buffer)
         @Suppress("UNCHECKED_CAST")
         val cb = mock(MdnsPacketRepeater.PacketRepeaterCallback::class.java)
-                as MdnsPacketRepeater.PacketRepeaterCallback<AnnouncementInfo>
+                as MdnsPacketRepeater.PacketRepeaterCallback<BaseAnnouncementInfo>
         val announcer = MdnsAnnouncer("testiface", thread.looper, replySender, cb)
         /*
         The expected packet replicates records announced when registering a service, as observed in
@@ -95,7 +91,7 @@ class MdnsAnnouncerTest {
         scapy.raw(scapy.dns_compress(scapy.DNS(rd=0, qr=1, aa=1,
         qd = None,
         an =
-        scapy.DNSRR(type='PTR', rrname='123.0.2.192.in-addr.arpa.', rdata='Android.local',
+        scapy.DNSRR(type='PTR', rrname='123.2.0.192.in-addr.arpa.', rdata='Android.local',
             rclass=0x8001, ttl=120) /
         scapy.DNSRR(type='PTR',
             rrname='3.2.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.B.D.0.1.0.0.2.ip6.arpa',
@@ -115,8 +111,8 @@ class MdnsAnnouncerTest {
         scapy.DNSRR(type='AAAA', rrname='Android.local', rclass=0x8001, rdata='2001:db8::456',
             ttl=120),
         ar =
-        scapy.DNSRRNSEC(rrname='123.0.2.192.in-addr.arpa.', rclass=0x8001, ttl=120,
-            nextname='123.0.2.192.in-addr.arpa.', typebitmaps=[12]) /
+        scapy.DNSRRNSEC(rrname='123.2.0.192.in-addr.arpa.', rclass=0x8001, ttl=120,
+            nextname='123.2.0.192.in-addr.arpa.', typebitmaps=[12]) /
         scapy.DNSRRNSEC(
             rrname='3.2.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.B.D.0.1.0.0.2.ip6.arpa',
             rclass=0x8001, ttl=120,
@@ -135,7 +131,7 @@ class MdnsAnnouncerTest {
             typebitmaps=[1, 28]))
         )).hex().upper()
         */
-        val expected = "00008400000000090000000503313233013001320331393207696E2D61646472046172706" +
+        val expected = "00008400000000090000000503313233013201300331393207696E2D61646472046172706" +
                 "100000C800100000078000F07416E64726F6964056C6F63616C00013301320131013001300130013" +
                 "00130013001300130013001300130013001300130013001300130013001300130013001380142014" +
                 "40130013101300130013203697036C020000C8001000000780002C030013601350134C045000C800" +
@@ -153,9 +149,9 @@ class MdnsAnnouncerTest {
         val v4Addr = parseNumericAddress("192.0.2.123")
         val v6Addr1 = parseNumericAddress("2001:DB8::123")
         val v6Addr2 = parseNumericAddress("2001:DB8::456")
-        val v4AddrRev = arrayOf("123", "0", "2", "192", "in-addr", "arpa")
-        val v6Addr1Rev = getReverseV6AddressName(v6Addr1)
-        val v6Addr2Rev = getReverseV6AddressName(v6Addr2)
+        val v4AddrRev = getReverseDnsAddress(v4Addr)
+        val v6Addr1Rev = getReverseDnsAddress(v6Addr1)
+        val v6Addr2Rev = getReverseDnsAddress(v6Addr2)
 
         val announcedRecords = listOf(
                 // Reverse address records
@@ -258,7 +254,10 @@ class MdnsAnnouncerTest {
             verify(socket, atLeast(i + 1)).send(any())
             val now = SystemClock.elapsedRealtime()
             assertTrue(now > timeStart + startDelay + i * FIRST_ANNOUNCES_DELAY)
-            assertTrue(now < timeStart + startDelay + (i + 1) * FIRST_ANNOUNCES_DELAY)
+            // Loops can be much slower than the expected timing (>100ms delay), use
+            // TEST_TIMEOUT_MS as tolerance.
+            assertTrue(now < timeStart + startDelay + (i + 1) * FIRST_ANNOUNCES_DELAY +
+                TEST_TIMEOUT_MS)
         }
 
         // Subsequent announces should happen quickly (NEXT_ANNOUNCES_DELAY)
@@ -270,14 +269,4 @@ class MdnsAnnouncerTest {
             assertEquals(expected, HexDump.toHexString(it.data))
         }
     }
-}
-
-/**
- * Compute 2001:db8::1 --> 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.B.D.1.0.0.2.ip6.arpa
- */
-private fun getReverseV6AddressName(addr: InetAddress): Array<String> {
-    assertTrue(addr is Inet6Address)
-    return addr.address.flatMapTo(mutableListOf("arpa", "ip6")) {
-        HexDump.toHexString(it).toCharArray().map(Char::toString)
-    }.reversed().toTypedArray()
 }

@@ -25,8 +25,6 @@ import com.android.server.connectivity.mdns.MdnsProber.ProbingInfo
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo
 import com.android.testutils.DevSdkIgnoreRunner
 import java.net.DatagramPacket
-import java.net.InetSocketAddress
-import java.net.MulticastSocket
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
@@ -38,14 +36,12 @@ import org.junit.runner.RunWith
 import org.mockito.ArgumentCaptor
 import org.mockito.Mockito.any
 import org.mockito.Mockito.atLeast
+import org.mockito.Mockito.doReturn
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.timeout
 import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
-
-private val destinationsSupplier = {
-    listOf(InetSocketAddress(MdnsConstants.getMdnsIPv6Address(), MdnsConstants.MDNS_PORT)) }
 
 private const val TEST_TIMEOUT_MS = 10_000L
 private const val SHORT_TIMEOUT_MS = 200L
@@ -57,7 +53,7 @@ private val TEST_SERVICE_NAME_2 = arrayOf("testservice2", "_nmt", "_tcp", "local
 @IgnoreUpTo(Build.VERSION_CODES.S_V2)
 class MdnsProberTest {
     private val thread = HandlerThread(MdnsProberTest::class.simpleName)
-    private val socket = mock(MulticastSocket::class.java)
+    private val socket = mock(MdnsInterfaceSocket::class.java)
     @Suppress("UNCHECKED_CAST")
     private val cb = mock(MdnsPacketRepeater.PacketRepeaterCallback::class.java)
         as MdnsPacketRepeater.PacketRepeaterCallback<ProbingInfo>
@@ -65,6 +61,7 @@ class MdnsProberTest {
 
     @Before
     fun setUp() {
+        doReturn(true).`when`(socket).hasJoinedIpv6()
         thread.start()
     }
 
@@ -74,7 +71,7 @@ class MdnsProberTest {
     }
 
     private class TestProbeInfo(probeRecords: List<MdnsRecord>, private val delayMs: Long = 1L) :
-            ProbingInfo(1 /* serviceId */, probeRecords, destinationsSupplier) {
+            ProbingInfo(1 /* serviceId */, probeRecords) {
         // Just send the packets quickly. Timing-related tests for MdnsPacketRepeater are already
         // done in MdnsAnnouncerTest.
         override fun getDelayMs(nextIndex: Int) = delayMs
@@ -117,7 +114,7 @@ class MdnsProberTest {
 
     @Test
     fun testProbe() {
-        val replySender = MdnsReplySender(thread.looper, socket, buffer)
+        val replySender = MdnsReplySender("testiface", thread.looper, socket, buffer)
         val prober = TestProber(thread.looper, replySender, cb)
         val probeInfo = TestProbeInfo(
                 listOf(makeServiceRecord(TEST_SERVICE_NAME_1, 37890)))
@@ -132,7 +129,7 @@ class MdnsProberTest {
 
     @Test
     fun testProbeMultipleRecords() {
-        val replySender = MdnsReplySender(thread.looper, socket, buffer)
+        val replySender = MdnsReplySender("testiface", thread.looper, socket, buffer)
         val prober = TestProber(thread.looper, replySender, cb)
         val probeInfo = TestProbeInfo(listOf(
                 makeServiceRecord(TEST_SERVICE_NAME_1, 37890),
@@ -170,7 +167,7 @@ class MdnsProberTest {
 
     @Test
     fun testStopProbing() {
-        val replySender = MdnsReplySender(thread.looper, socket, buffer)
+        val replySender = MdnsReplySender("testiface", thread.looper, socket, buffer)
         val prober = TestProber(thread.looper, replySender, cb)
         val probeInfo = TestProbeInfo(
                 listOf(makeServiceRecord(TEST_SERVICE_NAME_1, 37890)),

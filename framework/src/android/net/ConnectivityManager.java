@@ -1232,16 +1232,19 @@ public class ConnectivityManager {
     }
 
     /**
-     * Preference for {@link ProfileNetworkPreference#setPreference(int)}.
+     * Preference for {@link ProfileNetworkPreference.Builder#setPreference(int)}.
      * See {@link #setProfileNetworkPreferences(UserHandle, List, Executor, Runnable)}
-     * Specify that the traffic for this user should by follow the default rules.
+     * Specify that the traffic for this user should by follow the default rules:
+     * applications in the profile designated by the UserHandle behave like any
+     * other application and use the system default network as their default
+     * network. Compare other PROFILE_NETWORK_PREFERENCE_* settings.
      * @hide
      */
     @SystemApi(client = MODULE_LIBRARIES)
     public static final int PROFILE_NETWORK_PREFERENCE_DEFAULT = 0;
 
     /**
-     * Preference for {@link ProfileNetworkPreference#setPreference(int)}.
+     * Preference for {@link ProfileNetworkPreference.Builder#setPreference(int)}.
      * See {@link #setProfileNetworkPreferences(UserHandle, List, Executor, Runnable)}
      * Specify that the traffic for this user should by default go on a network with
      * {@link NetworkCapabilities#NET_CAPABILITY_ENTERPRISE}, and on the system default network
@@ -1252,15 +1255,37 @@ public class ConnectivityManager {
     public static final int PROFILE_NETWORK_PREFERENCE_ENTERPRISE = 1;
 
     /**
-     * Preference for {@link ProfileNetworkPreference#setPreference(int)}.
+     * Preference for {@link ProfileNetworkPreference.Builder#setPreference(int)}.
      * See {@link #setProfileNetworkPreferences(UserHandle, List, Executor, Runnable)}
      * Specify that the traffic for this user should by default go on a network with
      * {@link NetworkCapabilities#NET_CAPABILITY_ENTERPRISE} and if no such network is available
-     * should not go on the system default network
+     * should not have a default network at all (that is, network accesses that
+     * do not specify a network explicitly terminate with an error), even if there
+     * is a system default network available to apps outside this preference.
+     * The apps can still use a non-enterprise network if they request it explicitly
+     * provided that specific network doesn't require any specific permission they
+     * do not hold.
      * @hide
      */
     @SystemApi(client = MODULE_LIBRARIES)
     public static final int PROFILE_NETWORK_PREFERENCE_ENTERPRISE_NO_FALLBACK = 2;
+
+    /**
+     * Preference for {@link ProfileNetworkPreference.Builder#setPreference(int)}.
+     * See {@link #setProfileNetworkPreferences(UserHandle, List, Executor, Runnable)}
+     * Specify that the traffic for this user should by default go on a network with
+     * {@link NetworkCapabilities#NET_CAPABILITY_ENTERPRISE}.
+     * If there is no such network, the apps will have no default
+     * network at all, even if there are available non-enterprise networks on the
+     * device (that is, network accesses that do not specify a network explicitly
+     * terminate with an error). Additionally, the designated apps should be
+     * blocked from using any non-enterprise network even if they specify it
+     * explicitly, unless they hold specific privilege overriding this (see
+     * {@link android.Manifest.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS}).
+     * @hide
+     */
+    @SystemApi(client = MODULE_LIBRARIES)
+    public static final int PROFILE_NETWORK_PREFERENCE_ENTERPRISE_BLOCKING = 3;
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -1471,6 +1496,22 @@ public class ConnectivityManager {
         final UidRange[] rangesArray = getUidRangeArray(ranges);
         try {
             mService.setVpnNetworkPreference(session, rangesArray);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Temporarily set automaticOnOff keeplaive TCP polling alarm timer to 1 second.
+     *
+     * TODO: Remove this when the TCP polling design is replaced with callback.
+     * @param timeMs The time of expiry, with System.currentTimeMillis() base. The value should be
+     *               set no more than 5 minutes in the future.
+     * @hide
+     */
+    public void setTestLowTcpPollingTimerForKeepalive(long timeMs) {
+        try {
+            mService.setTestLowTcpPollingTimerForKeepalive(timeMs);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -2188,9 +2229,13 @@ public class ConnectivityManager {
         /** The requested keepalive was successfully started. */
         @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         public void onStarted() {}
+        /** The keepalive was resumed after being paused by the system. */
+        public void onResumed() {}
         /** The keepalive was successfully stopped. */
         @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         public void onStopped() {}
+        /** The keepalive was paused automatically by the system. */
+        public void onPaused() {}
         /** An error occurred. */
         @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         public void onError(int error) {}
@@ -2254,16 +2299,12 @@ public class ConnectivityManager {
         private final ISocketKeepaliveCallback mCallback;
         private final ExecutorService mExecutor;
 
-        private volatile Integer mSlot;
-
         @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         public void stop() {
             try {
                 mExecutor.execute(() -> {
                     try {
-                        if (mSlot != null) {
-                            mService.stopKeepalive(mNetwork, mSlot);
-                        }
+                        mService.stopKeepalive(mCallback);
                     } catch (RemoteException e) {
                         Log.e(TAG, "Error stopping packet keepalive: ", e);
                         throw e.rethrowFromSystemServer();
@@ -2281,12 +2322,23 @@ public class ConnectivityManager {
             mExecutor = Executors.newSingleThreadExecutor();
             mCallback = new ISocketKeepaliveCallback.Stub() {
                 @Override
-                public void onStarted(int slot) {
+                public void onStarted() {
                     final long token = Binder.clearCallingIdentity();
                     try {
                         mExecutor.execute(() -> {
-                            mSlot = slot;
                             callback.onStarted();
+                        });
+                    } finally {
+                        Binder.restoreCallingIdentity(token);
+                    }
+                }
+
+                @Override
+                public void onResumed() {
+                    final long token = Binder.clearCallingIdentity();
+                    try {
+                        mExecutor.execute(() -> {
+                            callback.onResumed();
                         });
                     } finally {
                         Binder.restoreCallingIdentity(token);
@@ -2298,8 +2350,20 @@ public class ConnectivityManager {
                     final long token = Binder.clearCallingIdentity();
                     try {
                         mExecutor.execute(() -> {
-                            mSlot = null;
                             callback.onStopped();
+                        });
+                    } finally {
+                        Binder.restoreCallingIdentity(token);
+                    }
+                    mExecutor.shutdown();
+                }
+
+                @Override
+                public void onPaused() {
+                    final long token = Binder.clearCallingIdentity();
+                    try {
+                        mExecutor.execute(() -> {
+                            callback.onPaused();
                         });
                     } finally {
                         Binder.restoreCallingIdentity(token);
@@ -2312,7 +2376,6 @@ public class ConnectivityManager {
                     final long token = Binder.clearCallingIdentity();
                     try {
                         mExecutor.execute(() -> {
-                            mSlot = null;
                             callback.onError(error);
                         });
                     } finally {
@@ -4838,6 +4901,7 @@ public class ConnectivityManager {
     @RequiresPermission(anyOf = {
             NetworkStack.PERMISSION_MAINLINE_NETWORK_STACK,
             android.Manifest.permission.NETWORK_SETTINGS,
+            android.Manifest.permission.NETWORK_SETUP_WIZARD,
             android.Manifest.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS})
     public void registerSystemDefaultNetworkCallback(@NonNull NetworkCallback networkCallback,
             @NonNull Handler handler) {

@@ -16,6 +16,7 @@
 
 package android.net.http.cts.util;
 
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -23,15 +24,16 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeThat;
+import static org.junit.Assume.assumeTrue;
 
+import android.net.http.CallbackException;
+import android.net.http.HttpException;
+import android.net.http.InlineExecutionProhibitedException;
+import android.net.http.UrlRequest;
+import android.net.http.UrlResponseInfo;
 import android.os.ConditionVariable;
 import android.os.StrictMode;
-
-import org.chromium.net.CallbackException;
-import org.chromium.net.CronetException;
-import org.chromium.net.InlineExecutionProhibitedException;
-import org.chromium.net.UrlRequest;
-import org.chromium.net.UrlResponseInfo;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -50,7 +52,7 @@ public class TestUrlRequestCallback extends UrlRequest.Callback {
     public ArrayList<UrlResponseInfo> mRedirectResponseInfoList = new ArrayList<>();
     public ArrayList<String> mRedirectUrlList = new ArrayList<>();
     public UrlResponseInfo mResponseInfo;
-    public CronetException mError;
+    public HttpException mError;
 
     public ResponseStep mResponseStep = ResponseStep.NOTHING;
 
@@ -89,7 +91,7 @@ public class TestUrlRequestCallback extends UrlRequest.Callback {
     // Signaled on each step when mAutoAdvance is false.
     private final ConditionVariable mStepBlock = new ConditionVariable();
 
-    // Executor Service for Cronet callbacks.
+    // Executor Service for Http callbacks.
     private final ExecutorService mExecutorService;
     private Thread mExecutorThread;
 
@@ -233,6 +235,19 @@ public class TestUrlRequestCallback extends UrlRequest.Callback {
     }
 
     /**
+     * Waits for a terminal callback to complete execution before skipping the test if the
+     * callback is not the expected one
+     *
+     * @param expectedStep the expected callback step
+     */
+    public void assumeCallback(ResponseStep expectedStep) {
+        if (isTerminalCallback(expectedStep)) {
+            assumeTrue("Did not receive terminal callback before timeout", blockForDone());
+        }
+        assumeThat(expectedStep, equalTo(mResponseStep));
+    }
+
+    /**
      * Blocks the calling thread until one of the final states has been called.
      * This is called before the callback has finished executed.
      */
@@ -349,7 +364,7 @@ public class TestUrlRequestCallback extends UrlRequest.Callback {
     }
 
     @Override
-    public void onFailed(UrlRequest request, UrlResponseInfo info, CronetException error) {
+    public void onFailed(UrlRequest request, UrlResponseInfo info, HttpException error) {
         // If the failure is because of prohibited direct execution, the test shouldn't fail
         // since the request already did.
         if (error.getCause() instanceof InlineExecutionProhibitedException) {
