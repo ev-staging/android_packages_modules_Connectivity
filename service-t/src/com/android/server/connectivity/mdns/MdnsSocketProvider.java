@@ -20,6 +20,9 @@ import static android.net.NetworkCapabilities.TRANSPORT_CELLULAR;
 import static android.net.NetworkCapabilities.TRANSPORT_VPN;
 import static android.net.NetworkCapabilities.TRANSPORT_WIFI;
 
+import static com.android.server.connectivity.mdns.util.MdnsUtils.ensureRunningOnHandlerThread;
+import static com.android.server.connectivity.mdns.util.MdnsUtils.isNetworkMatched;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
@@ -74,7 +77,7 @@ public class MdnsSocketProvider {
     @NonNull private final Dependencies mDependencies;
     @NonNull private final NetworkCallback mNetworkCallback;
     @NonNull private final TetheringEventCallback mTetheringEventCallback;
-    @NonNull private final ISocketNetLinkMonitor mSocketNetlinkMonitor;
+    @NonNull private final AbstractSocketNetlink mSocketNetlinkMonitor;
     private final ArrayMap<Network, SocketInfo> mNetworkSockets = new ArrayMap<>();
     private final ArrayMap<String, SocketInfo> mTetherInterfaceSockets = new ArrayMap<>();
     private final ArrayMap<Network, LinkProperties> mActiveNetworksLinkProperties =
@@ -171,7 +174,7 @@ public class MdnsSocketProvider {
             return iface.getIndex();
         }
         /*** Creates a SocketNetlinkMonitor */
-        public ISocketNetLinkMonitor createSocketNetlinkMonitor(@NonNull final Handler handler,
+        public AbstractSocketNetlink createSocketNetlinkMonitor(@NonNull final Handler handler,
                 @NonNull final SharedLog log,
                 @NonNull final NetLinkMonitorCallBack cb) {
             return SocketNetLinkMonitorFactory.createNetLinkMonitor(handler, log, cb);
@@ -242,14 +245,6 @@ public class MdnsSocketProvider {
         }
     }
 
-    /*** Ensure that current running thread is same as given handler thread */
-    public static void ensureRunningOnHandlerThread(Handler handler) {
-        if (handler.getLooper().getThread() != Thread.currentThread()) {
-            throw new IllegalStateException(
-                    "Not running on Handler thread: " + Thread.currentThread().getName());
-        }
-    }
-
     /*** Start monitoring sockets by listening callbacks for sockets creation or removal */
     public void startMonitoringSockets() {
         ensureRunningOnHandlerThread(mHandler);
@@ -315,12 +310,6 @@ public class MdnsSocketProvider {
         }
         mRequestStop = true;
         maybeStopMonitoringSockets();
-    }
-
-    /*** Check whether the target network is matched current network */
-    public static boolean isNetworkMatched(@Nullable Network targetNetwork,
-            @Nullable Network currentNetwork) {
-        return targetNetwork == null || targetNetwork.equals(currentNetwork);
     }
 
     private boolean matchRequestedNetwork(Network network) {
