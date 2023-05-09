@@ -1901,6 +1901,9 @@ public class ConnectivityManagerTest {
      */
     @AppModeFull(reason = "Cannot get WifiManager in instant app mode")
     @Test
+    // getSupportedKeepalives is available in updatable ConnectivityManager (S+)
+    // Also, this feature is not mainlined before S, and it's fine to skip on R- devices.
+    @DevSdkIgnoreRule.IgnoreUpTo(Build.VERSION_CODES.R) @ConnectivityModuleTest
     @RequiresDevice // Keepalive is not supported on virtual hardware
     public void testSocketKeepaliveLimitWifi() throws Exception {
         assumeTrue(mPackageManager.hasSystemFeature(FEATURE_WIFI));
@@ -1951,6 +1954,9 @@ public class ConnectivityManagerTest {
      */
     @AppModeFull(reason = "Cannot request network in instant app mode")
     @Test
+    // getSupportedKeepalives is available in updatable ConnectivityManager (S+)
+    // Also, this feature is not mainlined before S, and it's fine to skip on R- devices.
+    @DevSdkIgnoreRule.IgnoreUpTo(Build.VERSION_CODES.R) @ConnectivityModuleTest
     @RequiresDevice // Keepalive is not supported on virtual hardware
     public void testSocketKeepaliveLimitTelephony() throws Exception {
         if (!mPackageManager.hasSystemFeature(FEATURE_TELEPHONY)) {
@@ -1997,6 +2003,9 @@ public class ConnectivityManagerTest {
      */
     @AppModeFull(reason = "Cannot get WifiManager in instant app mode")
     @Test
+    // getSupportedKeepalives is available in updatable ConnectivityManager (S+)
+    // Also, this feature is not mainlined before S, and it's fine to skip on R- devices.
+    @DevSdkIgnoreRule.IgnoreUpTo(Build.VERSION_CODES.R) @ConnectivityModuleTest
     @RequiresDevice // Keepalive is not supported on virtual hardware
     public void testSocketKeepaliveUnprivileged() throws Exception {
         assumeTrue(mPackageManager.hasSystemFeature(FEATURE_WIFI));
@@ -2564,6 +2573,14 @@ public class ConnectivityManagerTest {
                 tetherUtils.registerTetheringEventCallback();
         try {
             tetherEventCallback.assumeWifiTetheringSupported(mContext);
+            // To prevent WiFi-to-WiFi interruption while entering APM:
+            //  - If WiFi is retained while entering APM, hotspot will also remain enabled.
+            //  - If WiFi is off before APM or disabled while entering APM, hotspot will be
+            //    disabled.
+            //
+            // To ensure hotspot always be disabled after enabling APM, disable wifi before
+            // enabling the hotspot.
+            mCtsNetUtils.disableWifi();
 
             tetherUtils.startWifiTethering(tetherEventCallback);
             // Update setting to verify the behavior.
@@ -2597,6 +2614,7 @@ public class ConnectivityManagerTest {
             ConnectivitySettingsManager.setPrivateDnsMode(mContext, curPrivateDnsMode);
             tetherUtils.unregisterTetheringEventCallback(tetherEventCallback);
             tetherUtils.stopAllTethering();
+            mCtsNetUtils.ensureWifiConnected();
         }
     }
 
