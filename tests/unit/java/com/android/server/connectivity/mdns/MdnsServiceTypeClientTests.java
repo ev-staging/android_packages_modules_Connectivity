@@ -90,6 +90,7 @@ public class MdnsServiceTypeClientTests {
 
     private static final long TEST_TTL = 120000L;
     private static final long TEST_ELAPSED_REALTIME = 123L;
+    private static final long TEST_TIMEOUT_MS = 10_000L;
 
     @Mock
     private MdnsServiceBrowserListener mockListenerOne;
@@ -1035,10 +1036,11 @@ public class MdnsServiceTypeClientTests {
         final String otherInstance = "instance2";
         final String ipV4Address = "192.0.2.0";
         final String ipV6Address = "2001:db8::";
+        final String capitalizedRequestInstance = "Instance1";
 
         final MdnsSearchOptions resolveOptions = MdnsSearchOptions.newBuilder()
                 // Use different case in the options
-                .setResolveInstanceName("Instance1").build();
+                .setResolveInstanceName(capitalizedRequestInstance).build();
 
         client.startSendAndReceive(mockListenerOne, resolveOptions);
         client.startSendAndReceive(mockListenerTwo, MdnsSearchOptions.getDefaultOptions());
@@ -1066,8 +1068,9 @@ public class MdnsServiceTypeClientTests {
                 Collections.emptyMap(), 0L /* ttl */), INTERFACE_INDEX, mockNetwork);
 
         // mockListenerOne gets notified for the requested instance
-        verify(mockListenerOne).onServiceNameDiscovered(matchServiceName(requestedInstance));
-        verify(mockListenerOne).onServiceFound(matchServiceName(requestedInstance));
+        verify(mockListenerOne).onServiceNameDiscovered(
+                matchServiceName(capitalizedRequestInstance));
+        verify(mockListenerOne).onServiceFound(matchServiceName(capitalizedRequestInstance));
 
         // ...but does not get any callback for the other instance
         verify(mockListenerOne, never()).onServiceFound(matchServiceName(otherInstance));
@@ -1078,8 +1081,9 @@ public class MdnsServiceTypeClientTests {
         // mockListenerTwo gets notified for both though
         final InOrder inOrder = inOrder(mockListenerTwo);
         inOrder.verify(mockListenerTwo).onServiceNameDiscovered(
-                matchServiceName(requestedInstance));
-        inOrder.verify(mockListenerTwo).onServiceFound(matchServiceName(requestedInstance));
+                matchServiceName(capitalizedRequestInstance));
+        inOrder.verify(mockListenerTwo).onServiceFound(
+                matchServiceName(capitalizedRequestInstance));
 
         inOrder.verify(mockListenerTwo).onServiceNameDiscovered(matchServiceName(otherInstance));
         inOrder.verify(mockListenerTwo).onServiceFound(matchServiceName(otherInstance));
@@ -1169,7 +1173,7 @@ public class MdnsServiceTypeClientTests {
     }
 
     @Test
-    public void testNotifyAllServicesRemoved() {
+    public void testNotifySocketDestroyed() throws Exception {
         client = new MdnsServiceTypeClient(
                 SERVICE_TYPE, mockSocketClient, currentThreadExecutor, mockNetwork, mockSharedLog);
 
@@ -1178,11 +1182,20 @@ public class MdnsServiceTypeClientTests {
         final String ipV4Address = "192.0.2.0";
 
         final MdnsSearchOptions resolveOptions = MdnsSearchOptions.newBuilder()
-                // Use different case in the options
-                .setResolveInstanceName("Instance1").build();
+                .setResolveInstanceName("instance1").build();
 
         client.startSendAndReceive(mockListenerOne, resolveOptions);
+        // Ensure the first task is executed so it schedules a future task
+        currentThreadExecutor.getAndClearSubmittedFuture().get(
+                TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         client.startSendAndReceive(mockListenerTwo, MdnsSearchOptions.getDefaultOptions());
+
+        // Filing the second request cancels the first future
+        verify(expectedSendFutures[0]).cancel(true);
+
+        // Ensure it gets executed too
+        currentThreadExecutor.getAndClearSubmittedFuture().get(
+                TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
 
         // Complete response from instanceName
         client.processResponse(createResponse(
@@ -1196,7 +1209,9 @@ public class MdnsServiceTypeClientTests {
                         Collections.emptyMap() /* textAttributes */, TEST_TTL),
                 INTERFACE_INDEX, mockNetwork);
 
-        client.notifyAllServicesRemoved();
+        verify(expectedSendFutures[1], never()).cancel(true);
+        client.notifySocketDestroyed();
+        verify(expectedSendFutures[1]).cancel(true);
 
         // mockListenerOne gets notified for the requested instance
         final InOrder inOrder1 = inOrder(mockListenerOne);
@@ -1261,6 +1276,7 @@ public class MdnsServiceTypeClientTests {
         private long lastScheduledDelayInMs;
         private Runnable lastScheduledRunnable;
         private Runnable lastSubmittedRunnable;
+        private Future<?> lastSubmittedFuture;
         private int futureIndex;
 
         FakeExecutor() {
@@ -1272,6 +1288,7 @@ public class MdnsServiceTypeClientTests {
         public Future<?> submit(Runnable command) {
             Future<?> future = super.submit(command);
             lastSubmittedRunnable = command;
+            lastSubmittedFuture = future;
             return future;
         }
 
@@ -1301,6 +1318,12 @@ public class MdnsServiceTypeClientTests {
         Runnable getAndClearSubmittedRunnable() {
             Runnable val = lastSubmittedRunnable;
             lastSubmittedRunnable = null;
+            return val;
+        }
+
+        Future<?> getAndClearSubmittedFuture() {
+            Future<?> val = lastSubmittedFuture;
+            lastSubmittedFuture = null;
             return val;
         }
     }
