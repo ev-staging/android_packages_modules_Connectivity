@@ -30,6 +30,8 @@ import static android.Manifest.permission.NETWORK_SETTINGS;
 import static android.Manifest.permission.NETWORK_SETUP_WIZARD;
 import static android.Manifest.permission.NETWORK_STACK;
 import static android.Manifest.permission.PACKET_KEEPALIVE_OFFLOAD;
+import static android.app.ActivityManager.UidFrozenStateChangedCallback.UID_FROZEN_STATE_FROZEN;
+import static android.app.ActivityManager.UidFrozenStateChangedCallback.UID_FROZEN_STATE_UNFROZEN;
 import static android.app.PendingIntent.FLAG_IMMUTABLE;
 import static android.content.Intent.ACTION_PACKAGE_ADDED;
 import static android.content.Intent.ACTION_PACKAGE_REMOVED;
@@ -148,6 +150,7 @@ import static android.net.resolv.aidl.IDnsResolverUnsolicitedEventListener.VALID
 import static android.os.Process.INVALID_UID;
 import static android.system.OsConstants.IPPROTO_TCP;
 
+import static com.android.server.ConnectivityService.KEY_DESTROY_FROZEN_SOCKETS_VERSION;
 import static com.android.server.ConnectivityService.MAX_NETWORK_REQUESTS_PER_SYSTEM_UID;
 import static com.android.server.ConnectivityService.PREFERENCE_ORDER_MOBILE_DATA_PREFERERRED;
 import static com.android.server.ConnectivityService.PREFERENCE_ORDER_OEM;
@@ -224,6 +227,8 @@ import static java.util.Arrays.asList;
 import android.Manifest;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.app.ActivityManager;
+import android.app.ActivityManager.UidFrozenStateChangedCallback;
 import android.app.AlarmManager;
 import android.app.AppOpsManager;
 import android.app.BroadcastOptions;
@@ -609,6 +614,7 @@ public class ConnectivityServiceTest {
     @Mock CarrierPrivilegeAuthenticator mCarrierPrivilegeAuthenticator;
     @Mock TetheringManager mTetheringManager;
     @Mock BroadcastOptionsShim mBroadcastOptionsShim;
+    @Mock ActivityManager mActivityManager;
 
     // BatteryStatsManager is final and cannot be mocked with regular mockito, so just mock the
     // underlying binder calls.
@@ -732,6 +738,7 @@ public class ConnectivityServiceTest {
             if (Context.BATTERY_STATS_SERVICE.equals(name)) return mBatteryStatsManager;
             if (Context.PAC_PROXY_SERVICE.equals(name)) return mPacProxyManager;
             if (Context.TETHERING_SERVICE.equals(name)) return mTetheringManager;
+            if (Context.ACTIVITY_SERVICE.equals(name)) return mActivityManager;
             return super.getSystemService(name);
         }
 
@@ -2081,6 +2088,8 @@ public class ConnectivityServiceTest {
             switch (name) {
                 case ConnectivityFlags.NO_REMATCH_ALL_REQUESTS_ON_REGISTER:
                     return true;
+                case KEY_DESTROY_FROZEN_SOCKETS_VERSION:
+                    return true;
                 default:
                     return super.isFeatureEnabled(context, name);
             }
@@ -2162,6 +2171,11 @@ public class ConnectivityServiceTest {
         @Override
         public void destroyLiveTcpSockets(final Set<Range<Integer>> ranges,
                 final Set<Integer> exemptUids) {
+            // This function is empty since the invocation of this method is verified by mocks
+        }
+
+        @Override
+        public void destroyLiveTcpSocketsByOwnerUids(final Set<Integer> ownerUids) {
             // This function is empty since the invocation of this method is verified by mocks
         }
     }
@@ -3801,6 +3815,12 @@ public class ConnectivityServiceTest {
 
         mWiFiAgent = new TestNetworkAgentWrapper(TRANSPORT_WIFI, callbacks);
 
+        if (mService.shouldCreateNetworksImmediately()) {
+            assertEquals("onNetworkCreated", eventOrder.poll(TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        } else {
+            assertNull(eventOrder.poll());
+        }
+
         // Connect a network, and file a request for it after it has come up, to ensure the nascent
         // timer is cleared and the test does not have to wait for it. Filing the request after the
         // network has come up is necessary because ConnectivityService does not appear to clear the
@@ -3808,7 +3828,12 @@ public class ConnectivityServiceTest {
         // connected.
         // TODO: fix this bug, file the request before connecting, and remove the waitForIdle.
         mWiFiAgent.connectWithoutInternet();
-        waitForIdle();
+        if (!mService.shouldCreateNetworksImmediately()) {
+            assertEquals("onNetworkCreated", eventOrder.poll(TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        } else {
+            waitForIdle();
+            assertNull(eventOrder.poll());
+        }
         mCm.requestNetwork(request, callback);
         callback.expectAvailableCallbacksUnvalidated(mWiFiAgent);
 
@@ -3825,7 +3850,6 @@ public class ConnectivityServiceTest {
 
         // Disconnect the network and check that events happened in the right order.
         mCm.unregisterNetworkCallback(callback);
-        assertEquals("onNetworkCreated", eventOrder.poll(TIMEOUT_MS, TimeUnit.MILLISECONDS));
         assertEquals("onNetworkUnwanted", eventOrder.poll(TIMEOUT_MS, TimeUnit.MILLISECONDS));
         assertEquals("timePasses", eventOrder.poll(TIMEOUT_MS, TimeUnit.MILLISECONDS));
         assertEquals("onNetworkDisconnected", eventOrder.poll(TIMEOUT_MS, TimeUnit.MILLISECONDS));
@@ -7611,7 +7635,9 @@ public class ConnectivityServiceTest {
         // Simple connection with initial LP should have updated ifaces.
         mCellAgent.connect(false);
         waitForIdle();
-        expectNotifyNetworkStatus(onlyCell(), onlyCell(), MOBILE_IFNAME);
+        List<Network> allNetworks = mService.shouldCreateNetworksImmediately()
+                ? cellAndWifi() : onlyCell();
+        expectNotifyNetworkStatus(allNetworks, onlyCell(), MOBILE_IFNAME);
         reset(mStatsManager);
 
         // Verify change fields other than interfaces does not trigger a notification to NSS.
@@ -7920,9 +7946,13 @@ public class ConnectivityServiceTest {
         setPrivateDnsSettings(PRIVATE_DNS_MODE_OPPORTUNISTIC, "ignored.example.com");
 
         mCellAgent = new TestNetworkAgentWrapper(TRANSPORT_CELLULAR);
+        final int netId = mCellAgent.getNetwork().netId;
         waitForIdle();
-        verify(mMockDnsResolver, never()).setResolverConfiguration(any());
-        verifyNoMoreInteractions(mMockDnsResolver);
+        if (mService.shouldCreateNetworksImmediately()) {
+            verify(mMockDnsResolver, times(1)).createNetworkCache(netId);
+        } else {
+            verify(mMockDnsResolver, never()).setResolverConfiguration(any());
+        }
 
         final LinkProperties cellLp = new LinkProperties();
         cellLp.setInterfaceName(MOBILE_IFNAME);
@@ -7938,10 +7968,13 @@ public class ConnectivityServiceTest {
         mCellAgent.sendLinkProperties(cellLp);
         mCellAgent.connect(false);
         waitForIdle();
-
-        verify(mMockDnsResolver, times(1)).createNetworkCache(eq(mCellAgent.getNetwork().netId));
-        // CS tells dnsresolver about the empty DNS config for this network.
+        if (!mService.shouldCreateNetworksImmediately()) {
+            // CS tells dnsresolver about the empty DNS config for this network.
+            verify(mMockDnsResolver, times(1)).createNetworkCache(netId);
+        }
         verify(mMockDnsResolver, atLeastOnce()).setResolverConfiguration(any());
+
+        verifyNoMoreInteractions(mMockDnsResolver);
         reset(mMockDnsResolver);
 
         cellLp.addDnsServer(InetAddress.getByName("2001:db8::1"));
@@ -8056,10 +8089,13 @@ public class ConnectivityServiceTest {
         mCm.requestNetwork(cellRequest, cellNetworkCallback);
 
         mCellAgent = new TestNetworkAgentWrapper(TRANSPORT_CELLULAR);
+        final int netId = mCellAgent.getNetwork().netId;
         waitForIdle();
-        // CS tells netd about the empty DNS config for this network.
-        verify(mMockDnsResolver, never()).setResolverConfiguration(any());
-        verifyNoMoreInteractions(mMockDnsResolver);
+        if (mService.shouldCreateNetworksImmediately()) {
+            verify(mMockDnsResolver, times(1)).createNetworkCache(netId);
+        } else {
+            verify(mMockDnsResolver, never()).setResolverConfiguration(any());
+        }
 
         final LinkProperties cellLp = new LinkProperties();
         cellLp.setInterfaceName(MOBILE_IFNAME);
@@ -8078,7 +8114,9 @@ public class ConnectivityServiceTest {
         mCellAgent.sendLinkProperties(cellLp);
         mCellAgent.connect(false);
         waitForIdle();
-        verify(mMockDnsResolver, times(1)).createNetworkCache(eq(mCellAgent.getNetwork().netId));
+        if (!mService.shouldCreateNetworksImmediately()) {
+            verify(mMockDnsResolver, times(1)).createNetworkCache(netId);
+        }
         verify(mMockDnsResolver, atLeastOnce()).setResolverConfiguration(
                 mResolverParamsParcelCaptor.capture());
         ResolverParamsParcel resolvrParams = mResolverParamsParcelCaptor.getValue();
@@ -8089,6 +8127,7 @@ public class ConnectivityServiceTest {
         assertEquals(2, resolvrParams.tlsServers.length);
         assertTrue(new ArraySet<>(resolvrParams.tlsServers).containsAll(
                 asList("2001:db8::1", "192.0.2.1")));
+        verifyNoMoreInteractions(mMockDnsResolver);
         reset(mMockDnsResolver);
         cellNetworkCallback.expect(AVAILABLE, mCellAgent);
         cellNetworkCallback.expect(NETWORK_CAPS_UPDATED, mCellAgent);
@@ -10235,6 +10274,50 @@ public class ConnectivityServiceTest {
         }
     }
 
+    private void doTestSetFirewallChainEnabledCloseSocket(final int chain,
+            final boolean isAllowList) throws Exception {
+        reset(mDeps);
+
+        mCm.setFirewallChainEnabled(chain, true /* enabled */);
+        final Set<Integer> uids =
+                new ArraySet<>(List.of(TEST_PACKAGE_UID, TEST_PACKAGE_UID2));
+        if (isAllowList) {
+            final Set<Range<Integer>> range = new ArraySet<>(
+                    List.of(new Range<>(Process.FIRST_APPLICATION_UID, Integer.MAX_VALUE)));
+            verify(mDeps).destroyLiveTcpSockets(range, uids);
+        } else {
+            verify(mDeps).destroyLiveTcpSocketsByOwnerUids(uids);
+        }
+
+        mCm.setFirewallChainEnabled(chain, false /* enabled */);
+        verifyNoMoreInteractions(mDeps);
+    }
+
+    @Test @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
+    public void testSetFirewallChainEnabledCloseSocket() throws Exception {
+        doReturn(new ArraySet<>(Arrays.asList(TEST_PACKAGE_UID, TEST_PACKAGE_UID2)))
+                .when(mBpfNetMaps)
+                .getUidsWithDenyRuleOnDenyListChain(anyInt());
+        doReturn(new ArraySet<>(Arrays.asList(TEST_PACKAGE_UID, TEST_PACKAGE_UID2)))
+                .when(mBpfNetMaps)
+                .getUidsWithAllowRuleOnAllowListChain(anyInt());
+
+        final boolean allowlist = true;
+        final boolean denylist = false;
+
+        doReturn(true).when(mBpfNetMaps).isFirewallAllowList(anyInt());
+        doTestSetFirewallChainEnabledCloseSocket(FIREWALL_CHAIN_DOZABLE, allowlist);
+        doTestSetFirewallChainEnabledCloseSocket(FIREWALL_CHAIN_POWERSAVE, allowlist);
+        doTestSetFirewallChainEnabledCloseSocket(FIREWALL_CHAIN_RESTRICTED, allowlist);
+        doTestSetFirewallChainEnabledCloseSocket(FIREWALL_CHAIN_LOW_POWER_STANDBY, allowlist);
+
+        doReturn(false).when(mBpfNetMaps).isFirewallAllowList(anyInt());
+        doTestSetFirewallChainEnabledCloseSocket(FIREWALL_CHAIN_STANDBY, denylist);
+        doTestSetFirewallChainEnabledCloseSocket(FIREWALL_CHAIN_OEM_DENY_1, denylist);
+        doTestSetFirewallChainEnabledCloseSocket(FIREWALL_CHAIN_OEM_DENY_2, denylist);
+        doTestSetFirewallChainEnabledCloseSocket(FIREWALL_CHAIN_OEM_DENY_3, denylist);
+    }
+
     private void doTestReplaceFirewallChain(final int chain) {
         final int[] uids = new int[] {1001, 1002};
         mCm.replaceFirewallChain(chain, uids);
@@ -10416,7 +10499,8 @@ public class ConnectivityServiceTest {
         if (inOrder != null) {
             return inOrder.verify(t);
         } else {
-            return verify(t);
+            // times(1) for consistency with the above. InOrder#verify always implies times(1).
+            return verify(t, times(1));
         }
     }
 
@@ -10465,6 +10549,21 @@ public class ConnectivityServiceTest {
         }
     }
 
+    private void expectNativeNetworkCreated(int netId, int permission, String iface,
+            InOrder inOrder) throws Exception {
+        verifyWithOrder(inOrder, mMockNetd).networkCreate(nativeNetworkConfigPhysical(netId,
+                permission));
+        verifyWithOrder(inOrder, mMockDnsResolver).createNetworkCache(eq(netId));
+        if (iface != null) {
+            verifyWithOrder(inOrder, mMockNetd).networkAddInterface(netId, iface);
+        }
+    }
+
+    private void expectNativeNetworkCreated(int netId, int permission, String iface)
+            throws Exception {
+        expectNativeNetworkCreated(netId, permission, iface, null /* inOrder */);
+    }
+
     @Test
     public void testStackedLinkProperties() throws Exception {
         final LinkAddress myIpv4 = new LinkAddress("1.2.3.4/24");
@@ -10502,11 +10601,8 @@ public class ConnectivityServiceTest {
         int cellNetId = mCellAgent.getNetwork().netId;
         waitForIdle();
 
-        verify(mMockNetd, times(1)).networkCreate(nativeNetworkConfigPhysical(cellNetId,
-                INetd.PERMISSION_NONE));
+        expectNativeNetworkCreated(cellNetId, INetd.PERMISSION_NONE, MOBILE_IFNAME);
         assertRoutesAdded(cellNetId, ipv6Subnet, ipv6Default);
-        verify(mMockDnsResolver, times(1)).createNetworkCache(eq(cellNetId));
-        verify(mMockNetd, times(1)).networkAddInterface(cellNetId, MOBILE_IFNAME);
         final ArrayTrackRecord<ReportedInterfaces>.ReadHead readHead =
                 mDeps.mReportedInterfaceHistory.newReadHead();
         assertNotNull(readHead.poll(TIMEOUT_MS, ri -> ri.contentEquals(mServiceContext,
@@ -15053,7 +15149,7 @@ public class ConnectivityServiceTest {
             UserHandle testHandle,
             TestNetworkCallback profileDefaultNetworkCallback,
             TestNetworkCallback disAllowProfileDefaultNetworkCallback) throws Exception {
-        final InOrder inOrder = inOrder(mMockNetd);
+        final InOrder inOrder = inOrder(mMockNetd, mMockDnsResolver);
 
         mCellAgent = new TestNetworkAgentWrapper(TRANSPORT_CELLULAR);
         mCellAgent.connect(true);
@@ -15069,8 +15165,16 @@ public class ConnectivityServiceTest {
 
         final TestNetworkAgentWrapper workAgent =
                 makeEnterpriseNetworkAgent(profileNetworkPreference.getPreferenceEnterpriseId());
+        if (mService.shouldCreateNetworksImmediately()) {
+            expectNativeNetworkCreated(workAgent.getNetwork().netId, INetd.PERMISSION_SYSTEM,
+                    null /* iface */, inOrder);
+        }
         if (connectWorkProfileAgentAhead) {
             workAgent.connect(false);
+            if (!mService.shouldCreateNetworksImmediately()) {
+                expectNativeNetworkCreated(workAgent.getNetwork().netId, INetd.PERMISSION_SYSTEM,
+                        null /* iface */, inOrder);
+            }
         }
 
         final TestOnCompleteListener listener = new TestOnCompleteListener();
@@ -15110,6 +15214,11 @@ public class ConnectivityServiceTest {
 
         if (!connectWorkProfileAgentAhead) {
             workAgent.connect(false);
+            if (!mService.shouldCreateNetworksImmediately()) {
+                inOrder.verify(mMockNetd).networkCreate(
+                        nativeNetworkConfigPhysical(workAgent.getNetwork().netId,
+                                INetd.PERMISSION_SYSTEM));
+            }
         }
 
         profileDefaultNetworkCallback.expectAvailableCallbacksUnvalidated(workAgent);
@@ -15118,8 +15227,6 @@ public class ConnectivityServiceTest {
         }
         mSystemDefaultNetworkCallback.assertNoCallback();
         mDefaultNetworkCallback.assertNoCallback();
-        inOrder.verify(mMockNetd).networkCreate(
-                nativeNetworkConfigPhysical(workAgent.getNetwork().netId, INetd.PERMISSION_SYSTEM));
         inOrder.verify(mMockNetd).networkAddUidRangesParcel(new NativeUidRangeConfig(
                 workAgent.getNetwork().netId,
                 uidRangeFor(testHandle, profileNetworkPreference),
@@ -17630,18 +17737,93 @@ public class ConnectivityServiceTest {
         });
     }
 
+    private void verifyMtuSetOnWifiInterface(int mtu) throws Exception {
+        verify(mMockNetd, times(1)).interfaceSetMtu(WIFI_IFNAME, mtu);
+    }
+
+    private void verifyMtuNeverSetOnWifiInterface() throws Exception {
+        verify(mMockNetd, never()).interfaceSetMtu(eq(WIFI_IFNAME), anyInt());
+    }
+
+    private void verifyMtuSetOnWifiInterfaceOnlyUpToT(int mtu) throws Exception {
+        if (!mService.shouldCreateNetworksImmediately()) {
+            verify(mMockNetd, times(1)).interfaceSetMtu(WIFI_IFNAME, mtu);
+        } else {
+            verify(mMockNetd, never()).interfaceSetMtu(eq(WIFI_IFNAME), anyInt());
+        }
+    }
+
+    private void verifyMtuSetOnWifiInterfaceOnlyStartingFromU(int mtu) throws Exception {
+        if (mService.shouldCreateNetworksImmediately()) {
+            verify(mMockNetd, times(1)).interfaceSetMtu(WIFI_IFNAME, mtu);
+        } else {
+            verify(mMockNetd, never()).interfaceSetMtu(eq(WIFI_IFNAME), anyInt());
+        }
+    }
+
     @Test
-    public void testSendLinkPropertiesSetInterfaceMtu() throws Exception {
-        final int mtu = 1327;
+    public void testSendLinkPropertiesSetInterfaceMtuBeforeConnect() throws Exception {
+        final int mtu = 1281;
         LinkProperties lp = new LinkProperties();
         lp.setInterfaceName(WIFI_IFNAME);
         lp.setMtu(mtu);
 
         mWiFiAgent = new TestNetworkAgentWrapper(TRANSPORT_WIFI);
         mWiFiAgent.sendLinkProperties(lp);
-
         waitForIdle();
-        verify(mMockNetd).interfaceSetMtu(eq(WIFI_IFNAME), eq(mtu));
+        verifyMtuSetOnWifiInterface(mtu);
+        reset(mMockNetd);
+
+        mWiFiAgent.connect(false /* validated */);
+        // Before U, the MTU is always (re-)applied when the network connects.
+        verifyMtuSetOnWifiInterfaceOnlyUpToT(mtu);
+    }
+
+    @Test
+    public void testSendLinkPropertiesUpdateInterfaceMtuBeforeConnect() throws Exception {
+        final int mtu = 1327;
+        LinkProperties lp = new LinkProperties();
+        lp.setInterfaceName(WIFI_IFNAME);
+        lp.setMtu(mtu);
+
+        // Registering an agent with an MTU only sets the MTU on U+.
+        mWiFiAgent = new TestNetworkAgentWrapper(TRANSPORT_WIFI, lp);
+        waitForIdle();
+        verifyMtuSetOnWifiInterfaceOnlyStartingFromU(mtu);
+        reset(mMockNetd);
+
+        // Future updates with the same MTU don't set the MTU even on T when it's not set initially.
+        mWiFiAgent.sendLinkProperties(lp);
+        waitForIdle();
+        verifyMtuNeverSetOnWifiInterface();
+
+        // Updating with a different MTU does work.
+        lp.setMtu(mtu + 1);
+        mWiFiAgent.sendLinkProperties(lp);
+        waitForIdle();
+        verifyMtuSetOnWifiInterface(mtu + 1);
+        reset(mMockNetd);
+
+        mWiFiAgent.connect(false /* validated */);
+        // Before U, the MTU is always (re-)applied when the network connects.
+        verifyMtuSetOnWifiInterfaceOnlyUpToT(mtu + 1);
+    }
+
+    @Test
+    public void testSendLinkPropertiesUpdateInterfaceMtuAfterConnect() throws Exception {
+        final int mtu = 1327;
+        LinkProperties lp = new LinkProperties();
+        lp.setInterfaceName(WIFI_IFNAME);
+        lp.setMtu(mtu);
+
+        mWiFiAgent = new TestNetworkAgentWrapper(TRANSPORT_WIFI);
+        mWiFiAgent.connect(false /* validated */);
+        verifyMtuNeverSetOnWifiInterface();
+
+        mWiFiAgent.sendLinkProperties(lp);
+        waitForIdle();
+        // The MTU is always (re-)applied when the network connects.
+        verifyMtuSetOnWifiInterface(mtu);
     }
 
     @Test
@@ -17652,14 +17834,15 @@ public class ConnectivityServiceTest {
         lp.setMtu(mtu);
 
         mWiFiAgent = new TestNetworkAgentWrapper(TRANSPORT_WIFI, lp);
+        mWiFiAgent.connect(false /* validated */);
+        verifyMtuSetOnWifiInterface(mtu);
+        reset(mMockNetd);
 
         LinkProperties lp2 = new LinkProperties(lp);
         lp2.setMtu(mtu2);
-
         mWiFiAgent.sendLinkProperties(lp2);
-
         waitForIdle();
-        verify(mMockNetd).interfaceSetMtu(eq(WIFI_IFNAME), eq(mtu2));
+        verifyMtuSetOnWifiInterface(mtu2);
     }
 
     @Test
@@ -17670,10 +17853,13 @@ public class ConnectivityServiceTest {
         lp.setMtu(mtu);
 
         mWiFiAgent = new TestNetworkAgentWrapper(TRANSPORT_WIFI, lp);
-        mWiFiAgent.sendLinkProperties(new LinkProperties(lp));
+        mWiFiAgent.connect(false /* validated */);
+        verifyMtuSetOnWifiInterface(mtu);
+        reset(mMockNetd);
 
+        mWiFiAgent.sendLinkProperties(new LinkProperties(lp));
         waitForIdle();
-        verify(mMockNetd, never()).interfaceSetMtu(eq(WIFI_IFNAME), anyInt());
+        verifyMtuNeverSetOnWifiInterface();
     }
 
     @Test
@@ -17684,15 +17870,15 @@ public class ConnectivityServiceTest {
         lp.setMtu(mtu);
 
         mWiFiAgent = new TestNetworkAgentWrapper(TRANSPORT_WIFI, lp);
+        mWiFiAgent.connect(false /* validated */);
+        verifyMtuSetOnWifiInterface(mtu);
+        reset(mMockNetd);
 
-        LinkProperties lp2 = new LinkProperties();
-        assertNull(lp2.getInterfaceName());
-        lp2.setMtu(mtu);
-
+        LinkProperties lp2 = new LinkProperties(lp);
+        lp2.setInterfaceName(null);
         mWiFiAgent.sendLinkProperties(new LinkProperties(lp2));
-
         waitForIdle();
-        verify(mMockNetd, never()).interfaceSetMtu(any(), anyInt());
+        verifyMtuNeverSetOnWifiInterface();
     }
 
     @Test
@@ -17703,16 +17889,18 @@ public class ConnectivityServiceTest {
         lp.setMtu(mtu);
 
         mWiFiAgent = new TestNetworkAgentWrapper(TRANSPORT_WIFI, lp);
+        mWiFiAgent.connect(false /* validated */);
+        verifyMtuSetOnWifiInterface(mtu);
+        reset(mMockNetd);
 
         final String ifaceName2 = WIFI_IFNAME + "_2";
-        LinkProperties lp2 = new LinkProperties();
+        LinkProperties lp2 = new LinkProperties(lp);
         lp2.setInterfaceName(ifaceName2);
-        lp2.setMtu(mtu);
 
         mWiFiAgent.sendLinkProperties(new LinkProperties(lp2));
-
         waitForIdle();
-        verify(mMockNetd).interfaceSetMtu(eq(ifaceName2), eq(mtu));
+        verify(mMockNetd, times(1)).interfaceSetMtu(eq(ifaceName2), eq(mtu));
+        verifyMtuNeverSetOnWifiInterface();
     }
 
     @Test
@@ -17767,5 +17955,65 @@ public class ConnectivityServiceTest {
 
         verify(mMockNetd, never()).wakeupAddInterface(eq(ethernetIface), anyString(), anyInt(),
                 anyInt());
+    }
+
+    private static final int TEST_FROZEN_UID = 1000;
+    private static final int TEST_UNFROZEN_UID = 2000;
+
+    /**
+     * Send a UidFrozenStateChanged message to ConnectivityService. Verify that only the frozen UID
+     * gets passed to socketDestroy().
+     */
+    @Test
+    @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)
+    public void testFrozenUidSocketDestroy() throws Exception {
+        ArgumentCaptor<UidFrozenStateChangedCallback> callbackArg =
+                ArgumentCaptor.forClass(UidFrozenStateChangedCallback.class);
+
+        verify(mActivityManager).registerUidFrozenStateChangedCallback(any(),
+                callbackArg.capture());
+
+        final int[] uids = {TEST_FROZEN_UID, TEST_UNFROZEN_UID};
+        final int[] frozenStates = {UID_FROZEN_STATE_FROZEN, UID_FROZEN_STATE_UNFROZEN};
+
+        callbackArg.getValue().onUidFrozenStateChanged(uids, frozenStates);
+
+        waitForIdle();
+
+        final Set<Integer> exemptUids = new ArraySet();
+        final UidRange frozenUidRange = new UidRange(TEST_FROZEN_UID, TEST_FROZEN_UID);
+        final Set<UidRange> ranges = Collections.singleton(frozenUidRange);
+
+        verify(mDeps).destroyLiveTcpSockets(eq(UidRange.toIntRanges(ranges)),
+                eq(exemptUids));
+    }
+
+    @Test
+    public void testDisconnectSuspendedNetworkStopClatd() throws Exception {
+        final TestNetworkCallback networkCallback = new TestNetworkCallback();
+        final NetworkRequest networkRequest = new NetworkRequest.Builder()
+                .addCapability(NET_CAPABILITY_DUN)
+                .build();
+        mCm.requestNetwork(networkRequest, networkCallback);
+
+        final IpPrefix nat64Prefix = new IpPrefix(InetAddress.getByName("64:ff9b::"), 96);
+        NetworkCapabilities nc = new NetworkCapabilities().addCapability(NET_CAPABILITY_DUN);
+        final LinkProperties lp = new LinkProperties();
+        lp.setInterfaceName(MOBILE_IFNAME);
+        lp.addLinkAddress(new LinkAddress("2001:db8:1::1/64"));
+        lp.setNat64Prefix(nat64Prefix);
+        mCellAgent = new TestNetworkAgentWrapper(TRANSPORT_CELLULAR, lp, nc);
+        mCellAgent.connect(true /* validated */, false /* hasInternet */,
+                false /* privateDnsProbeSent */);
+
+        verifyClatdStart(null /* inOrder */, MOBILE_IFNAME, mCellAgent.getNetwork().netId,
+                nat64Prefix.toString());
+
+        mCellAgent.suspend();
+        mCm.unregisterNetworkCallback(networkCallback);
+        mCellAgent.expectDisconnected();
+        waitForIdle();
+
+        verifyClatdStop(null /* inOrder */, MOBILE_IFNAME);
     }
 }

@@ -28,13 +28,16 @@ import android.util.Pair;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.SharedLog;
+import com.android.server.connectivity.mdns.util.MdnsUtils;
 
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -175,6 +178,7 @@ public class MdnsServiceTypeClient {
             @NonNull MdnsSearchOptions searchOptions) {
         synchronized (lock) {
             this.searchOptions = searchOptions;
+            boolean hadReply = false;
             if (listeners.put(listener, searchOptions) == null) {
                 for (MdnsResponse existingResponse : instanceNameToResponse.values()) {
                     if (!responseMatchesOptions(existingResponse, searchOptions)) continue;
@@ -183,6 +187,7 @@ public class MdnsServiceTypeClient {
                     listener.onServiceNameDiscovered(info);
                     if (existingResponse.isComplete()) {
                         listener.onServiceFound(info);
+                        hadReply = true;
                     }
                 }
             }
@@ -192,22 +197,37 @@ public class MdnsServiceTypeClient {
             }
             // Keep tracking the ScheduledFuture for the task so we can cancel it if caller is not
             // interested anymore.
-            requestTaskFuture =
-                    executor.submit(
-                            new QueryTask(
-                                    new QueryTaskConfig(
-                                            searchOptions.getSubtypes(),
-                                            searchOptions.isPassiveMode(),
-                                            ++currentSessionId,
-                                            searchOptions.getNetwork())));
+            final QueryTaskConfig taskConfig = new QueryTaskConfig(
+                    searchOptions.getSubtypes(),
+                    searchOptions.isPassiveMode(),
+                    ++currentSessionId,
+                    searchOptions.getNetwork());
+            if (hadReply) {
+                requestTaskFuture = scheduleNextRunLocked(taskConfig);
+            } else {
+                requestTaskFuture = executor.submit(new QueryTask(taskConfig));
+            }
         }
     }
 
     private boolean responseMatchesOptions(@NonNull MdnsResponse response,
             @NonNull MdnsSearchOptions options) {
-        if (options.getResolveInstanceName() == null) return true;
-        // DNS is case-insensitive, so ignore case in the comparison
-        return options.getResolveInstanceName().equalsIgnoreCase(response.getServiceInstanceName());
+        final boolean matchesInstanceName = options.getResolveInstanceName() == null
+                // DNS is case-insensitive, so ignore case in the comparison
+                || MdnsUtils.equalsIgnoreDnsCase(options.getResolveInstanceName(),
+                        response.getServiceInstanceName());
+
+        // If discovery is requiring some subtypes, the response must have one that matches a
+        // requested one.
+        final List<String> responseSubtypes = response.getSubtypes() == null
+                ? Collections.emptyList() : response.getSubtypes();
+        final boolean matchesSubtype = options.getSubtypes().size() == 0
+                || CollectionUtils.any(options.getSubtypes(), requiredSub ->
+                CollectionUtils.any(responseSubtypes, actualSub ->
+                        MdnsUtils.equalsIgnoreDnsCase(
+                                MdnsConstants.SUBTYPE_PREFIX + requiredSub, actualSub)));
+
+        return matchesInstanceName && matchesSubtype;
     }
 
     /**
@@ -263,6 +283,33 @@ public class MdnsServiceTypeClient {
         }
     }
 
+    /** Notify all services are removed because the socket is destroyed. */
+    public void notifySocketDestroyed() {
+        synchronized (lock) {
+            for (MdnsResponse response : instanceNameToResponse.values()) {
+                final String name = response.getServiceInstanceName();
+                if (name == null) continue;
+                for (int i = 0; i < listeners.size(); i++) {
+                    if (!responseMatchesOptions(response, listeners.valueAt(i))) continue;
+                    final MdnsServiceBrowserListener listener = listeners.keyAt(i);
+                    final MdnsServiceInfo serviceInfo =
+                            buildMdnsServiceInfoFromResponse(response, serviceTypeLabels);
+                    if (response.isComplete()) {
+                        sharedLog.log("Socket destroyed. onServiceRemoved: " + name);
+                        listener.onServiceRemoved(serviceInfo);
+                    }
+                    sharedLog.log("Socket destroyed. onServiceNameRemoved: " + name);
+                    listener.onServiceNameRemoved(serviceInfo);
+                }
+            }
+
+            if (requestTaskFuture != null) {
+                requestTaskFuture.cancel(true);
+                requestTaskFuture = null;
+            }
+        }
+    }
+
     private void onResponseModified(@NonNull MdnsResponse response) {
         final String serviceInstanceName = response.getServiceInstanceName();
         final MdnsResponse currentResponse =
@@ -288,16 +335,16 @@ public class MdnsServiceTypeClient {
             if (!responseMatchesOptions(response, listeners.valueAt(i))) continue;
             final MdnsServiceBrowserListener listener = listeners.keyAt(i);
             if (newServiceFound) {
-                sharedLog.log("onServiceNameDiscovered: " + serviceInstanceName);
+                sharedLog.log("onServiceNameDiscovered: " + serviceInfo);
                 listener.onServiceNameDiscovered(serviceInfo);
             }
 
             if (response.isComplete()) {
                 if (newServiceFound || serviceBecomesComplete) {
-                    sharedLog.log("onServiceFound: " + serviceInstanceName);
+                    sharedLog.log("onServiceFound: " + serviceInfo);
                     listener.onServiceFound(serviceInfo);
                 } else {
-                    sharedLog.log("onServiceUpdated: " + serviceInstanceName);
+                    sharedLog.log("onServiceUpdated: " + serviceInfo);
                     listener.onServiceUpdated(serviceInfo);
                 }
             }
@@ -315,10 +362,10 @@ public class MdnsServiceTypeClient {
             final MdnsServiceInfo serviceInfo =
                     buildMdnsServiceInfoFromResponse(response, serviceTypeLabels);
             if (response.isComplete()) {
-                sharedLog.log("onServiceRemoved: " + serviceInstanceName);
+                sharedLog.log("onServiceRemoved: " + serviceInfo);
                 listener.onServiceRemoved(serviceInfo);
             }
-            sharedLog.log("onServiceNameRemoved: " + serviceInstanceName);
+            sharedLog.log("onServiceNameRemoved: " + serviceInfo);
             listener.onServiceNameRemoved(serviceInfo);
         }
     }
@@ -535,30 +582,31 @@ public class MdnsServiceTypeClient {
                                     continue;
                                 }
                                 final MdnsServiceBrowserListener listener = listeners.keyAt(i);
-                                String serviceInstanceName =
-                                        existingResponse.getServiceInstanceName();
-                                if (serviceInstanceName != null) {
+                                if (existingResponse.getServiceInstanceName() != null) {
                                     final MdnsServiceInfo serviceInfo =
                                             buildMdnsServiceInfoFromResponse(
                                                     existingResponse, serviceTypeLabels);
                                     if (existingResponse.isComplete()) {
                                         sharedLog.log("TTL expired. onServiceRemoved: "
-                                                + serviceInstanceName);
+                                                + serviceInfo);
                                         listener.onServiceRemoved(serviceInfo);
                                     }
                                     sharedLog.log("TTL expired. onServiceNameRemoved: "
-                                            + serviceInstanceName);
+                                            + serviceInfo);
                                     listener.onServiceNameRemoved(serviceInfo);
                                 }
                             }
                         }
                     }
                 }
-                QueryTaskConfig config = this.config.getConfigForNextRun();
-                requestTaskFuture =
-                        executor.schedule(
-                                new QueryTask(config), config.timeToRunNextTaskInMs, MILLISECONDS);
+                requestTaskFuture = scheduleNextRunLocked(this.config);
             }
         }
+    }
+
+    @NonNull
+    private Future<?> scheduleNextRunLocked(@NonNull QueryTaskConfig lastRunConfig) {
+        QueryTaskConfig config = lastRunConfig.getConfigForNextRun();
+        return executor.schedule(new QueryTask(config), config.timeToRunNextTaskInMs, MILLISECONDS);
     }
 }
