@@ -25,6 +25,9 @@ import static android.net.ConnectivityDiagnosticsManager.DataStallReport;
 import static android.net.ConnectivityManager.NetworkCallback;
 import static android.net.INetd.IF_STATE_DOWN;
 import static android.net.INetd.IF_STATE_UP;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_TEMPORARILY_NOT_METERED;
 import static android.net.NetworkCapabilities.TRANSPORT_CELLULAR;
 import static android.net.NetworkCapabilities.TRANSPORT_WIFI;
 import static android.net.RouteInfo.RTN_UNREACHABLE;
@@ -40,7 +43,6 @@ import static android.net.ipsec.ike.IkeSessionParams.ESP_ENCAP_TYPE_UDP;
 import static android.net.ipsec.ike.IkeSessionParams.ESP_IP_VERSION_AUTO;
 import static android.net.ipsec.ike.IkeSessionParams.ESP_IP_VERSION_IPV4;
 import static android.net.ipsec.ike.IkeSessionParams.ESP_IP_VERSION_IPV6;
-import static android.os.Build.VERSION_CODES.S_V2;
 import static android.os.UserHandle.PER_USER_RANGE;
 import static android.telephony.CarrierConfigManager.KEY_CARRIER_CONFIG_APPLIED_BOOL;
 import static android.telephony.CarrierConfigManager.KEY_MIN_UDP_PORT_4500_NAT_TIMEOUT_SEC_INT;
@@ -55,7 +57,6 @@ import static com.android.server.connectivity.Vpn.PREFERRED_IKE_PROTOCOL_IPV4_UD
 import static com.android.server.connectivity.Vpn.PREFERRED_IKE_PROTOCOL_IPV6_ESP;
 import static com.android.server.connectivity.Vpn.PREFERRED_IKE_PROTOCOL_IPV6_UDP;
 import static com.android.testutils.Cleanup.testAndCleanup;
-import static com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
 import static com.android.testutils.MiscAsserts.assertThrows;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -166,6 +167,7 @@ import android.util.ArraySet;
 import android.util.Pair;
 import android.util.Range;
 
+import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.filters.SmallTest;
 
 import com.android.internal.R;
@@ -173,12 +175,12 @@ import com.android.internal.net.LegacyVpnInfo;
 import com.android.internal.net.VpnConfig;
 import com.android.internal.net.VpnProfile;
 import com.android.internal.util.HexDump;
+import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.DeviceIdleInternal;
 import com.android.server.IpSecService;
 import com.android.server.VpnTestBase;
 import com.android.server.vcn.util.PersistableBundleUtils;
 import com.android.testutils.DevSdkIgnoreRule;
-import com.android.testutils.DevSdkIgnoreRunner;
 
 import org.junit.Before;
 import org.junit.Rule;
@@ -196,6 +198,7 @@ import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.StringWriter;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
@@ -213,7 +216,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Tests for {@link Vpn}.
@@ -221,9 +225,8 @@ import java.util.stream.Stream;
  * Build, install and run with:
  *  runtest frameworks-net -c com.android.server.connectivity.VpnTest
  */
-@RunWith(DevSdkIgnoreRunner.class)
+@RunWith(AndroidJUnit4.class)
 @SmallTest
-@IgnoreUpTo(S_V2)
 public class VpnTest extends VpnTestBase {
     private static final String TAG = "VpnTest";
 
@@ -2608,6 +2611,81 @@ public class VpnTest extends VpnTestBase {
         vpnSnapShot.vpn.mVpnRunner.exitVpnRunner();
     }
 
+    private String getDump(@NonNull final Vpn vpn) {
+        final StringWriter sw = new StringWriter();
+        final IndentingPrintWriter writer = new IndentingPrintWriter(sw, "");
+        vpn.dump(writer);
+        writer.flush();
+        return sw.toString();
+    }
+
+    private int countMatches(@NonNull final Pattern regexp, @NonNull final String string) {
+        final Matcher m = regexp.matcher(string);
+        int i = 0;
+        while (m.find()) ++i;
+        return i;
+    }
+
+    @Test
+    public void testNCEventChanges() throws Exception {
+        final NetworkCapabilities.Builder ncBuilder = new NetworkCapabilities.Builder()
+                .addTransportType(TRANSPORT_CELLULAR)
+                .addCapability(NET_CAPABILITY_INTERNET)
+                .addCapability(NET_CAPABILITY_NOT_RESTRICTED)
+                .setLinkDownstreamBandwidthKbps(1000)
+                .setLinkUpstreamBandwidthKbps(500);
+
+        final Ikev2VpnProfile ikeProfile =
+                new Ikev2VpnProfile.Builder(TEST_VPN_SERVER, TEST_VPN_IDENTITY)
+                        .setAuthPsk(TEST_VPN_PSK)
+                        .setBypassable(true /* isBypassable */)
+                        .setAutomaticNattKeepaliveTimerEnabled(true)
+                        .setAutomaticIpVersionSelectionEnabled(true)
+                        .build();
+
+        final PlatformVpnSnapshot vpnSnapShot =
+                verifySetupPlatformVpn(ikeProfile.toVpnProfile(),
+                        createIkeConfig(createIkeConnectInfo(), true /* isMobikeEnabled */),
+                        ncBuilder.build(), false /* mtuSupportsIpv6 */,
+                        true /* areLongLivedTcpConnectionsExpensive */);
+
+        // Calls to onCapabilitiesChanged will be thrown to the executor for execution ; by
+        // default this will incur a 10ms delay before it's executed, messing with the timing
+        // of the log and having the checks for counts in equals() below flake.
+        mExecutor.executeDirect = true;
+
+        // First nc changed triggered by verifySetupPlatformVpn
+        final Pattern pattern = Pattern.compile("Cap changed from", Pattern.MULTILINE);
+        final String stage1 = getDump(vpnSnapShot.vpn);
+        assertEquals(1, countMatches(pattern, stage1));
+
+        vpnSnapShot.nwCb.onCapabilitiesChanged(TEST_NETWORK, ncBuilder.build());
+        final String stage2 = getDump(vpnSnapShot.vpn);
+        // Was the same caps, there should still be only 1 match
+        assertEquals(1, countMatches(pattern, stage2));
+
+        ncBuilder.setLinkDownstreamBandwidthKbps(1200)
+                .setLinkUpstreamBandwidthKbps(300);
+        vpnSnapShot.nwCb.onCapabilitiesChanged(TEST_NETWORK, ncBuilder.build());
+        final String stage3 = getDump(vpnSnapShot.vpn);
+        // Was not an important change, should not be logged, still only 1 match
+        assertEquals(1, countMatches(pattern, stage3));
+
+        ncBuilder.addCapability(NET_CAPABILITY_TEMPORARILY_NOT_METERED);
+        vpnSnapShot.nwCb.onCapabilitiesChanged(TEST_NETWORK, ncBuilder.build());
+        final String stage4 = getDump(vpnSnapShot.vpn);
+        // Change to caps is important, should cause a new match
+        assertEquals(2, countMatches(pattern, stage4));
+
+        ncBuilder.removeCapability(NET_CAPABILITY_TEMPORARILY_NOT_METERED);
+        ncBuilder.setLinkDownstreamBandwidthKbps(600);
+        vpnSnapShot.nwCb.onCapabilitiesChanged(TEST_NETWORK, ncBuilder.build());
+        final String stage5 = getDump(vpnSnapShot.vpn);
+        // Change to caps is important, should cause a new match even with the unimportant change
+        assertEquals(3, countMatches(pattern, stage5));
+    }
+    // TODO : beef up event logs tests
+
     private void verifyHandlingNetworkLoss(PlatformVpnSnapshot vpnSnapShot) throws Exception {
         // Forget the #sendLinkProperties during first setup.
         reset(mMockNetworkAgent);
@@ -3104,31 +3182,5 @@ public class VpnTest extends VpnTestBase {
             }).when(mPackageManager).getPackageUidAsUser(anyString(), anyInt());
         } catch (Exception e) {
         }
-    }
-
-    private void setMockedNetworks(final Map<Network, NetworkCapabilities> networks) {
-        doAnswer(invocation -> {
-            final Network network = (Network) invocation.getArguments()[0];
-            return networks.get(network);
-        }).when(mConnectivityManager).getNetworkCapabilities(any());
-    }
-
-    // Need multiple copies of this, but Java's Stream objects can't be reused or
-    // duplicated.
-    private Stream<String> publicIpV4Routes() {
-        return Stream.of(
-                "0.0.0.0/5", "8.0.0.0/7", "11.0.0.0/8", "12.0.0.0/6", "16.0.0.0/4",
-                "32.0.0.0/3", "64.0.0.0/2", "128.0.0.0/3", "160.0.0.0/5", "168.0.0.0/6",
-                "172.0.0.0/12", "172.32.0.0/11", "172.64.0.0/10", "172.128.0.0/9",
-                "173.0.0.0/8", "174.0.0.0/7", "176.0.0.0/4", "192.0.0.0/9", "192.128.0.0/11",
-                "192.160.0.0/13", "192.169.0.0/16", "192.170.0.0/15", "192.172.0.0/14",
-                "192.176.0.0/12", "192.192.0.0/10", "193.0.0.0/8", "194.0.0.0/7",
-                "196.0.0.0/6", "200.0.0.0/5", "208.0.0.0/4");
-    }
-
-    private Stream<String> publicIpV6Routes() {
-        return Stream.of(
-                "::/1", "8000::/2", "c000::/3", "e000::/4", "f000::/5", "f800::/6",
-                "fe00::/8", "2605:ef80:e:af1d::/64");
     }
 }
