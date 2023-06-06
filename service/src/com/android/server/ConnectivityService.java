@@ -318,6 +318,7 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.PrintWriter;
 import java.io.Writer;
+import java.lang.IllegalArgumentException;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -442,6 +443,8 @@ public class ConnectivityService extends IConnectivityManager.Stub
 
     private final Context mContext;
     private final ConnectivityResources mResources;
+    private final int mWakeUpMark;
+    private final int mWakeUpMask;
     // The Context is created for UserHandle.ALL.
     private final Context mUserAllContext;
     private final Dependencies mDeps;
@@ -1610,6 +1613,29 @@ public class ConnectivityService extends IConnectivityManager.Stub
         mNascentDelayMs = DEFAULT_NASCENT_DELAY_MS;
         mCellularRadioTimesharingCapable =
                 mResources.get().getBoolean(R.bool.config_cellular_radio_timesharing_capable);
+
+        int mark = mResources.get().getInteger(R.integer.config_networkWakeupPacketMark);
+        int mask = mResources.get().getInteger(R.integer.config_networkWakeupPacketMask);
+
+        if (SdkLevel.isAtLeastU()) {
+            // U+ default value of both mark & mask, this is the top bit of the skb->mark,
+            // see //system/netd/include/FwMark.h union Fwmark, field ingress_cpu_wakeup
+            final int defaultUMarkMask = 0x80000000;  // u32
+
+            if ((mark == 0) || (mask == 0)) {
+                // simply treat unset/disabled as the default U value
+                mark = defaultUMarkMask;
+                mask = defaultUMarkMask;
+            }
+            if ((mark != defaultUMarkMask) || (mask != defaultUMarkMask)) {
+                // invalid device overlay settings
+                throw new IllegalArgumentException(
+                        "Bad config_networkWakeupPacketMark/Mask " + mark + "/" + mask);
+            }
+        }
+
+        mWakeUpMark = mark;
+        mWakeUpMask = mask;
 
         mNetd = netd;
         mBpfNetMaps = mDeps.getBpfNetMaps(mContext, netd);
@@ -8091,21 +8117,18 @@ public class ConnectivityService extends IConnectivityManager.Stub
             return;
         }
 
-        int mark = mResources.get().getInteger(R.integer.config_networkWakeupPacketMark);
-        int mask = mResources.get().getInteger(R.integer.config_networkWakeupPacketMask);
-
         // Mask/mark of zero will not detect anything interesting.
         // Don't install rules unless both values are nonzero.
-        if (mark == 0 || mask == 0) {
+        if (mWakeUpMark == 0 || mWakeUpMask == 0) {
             return;
         }
 
         final String prefix = makeNflogPrefix(iface, nai.network.getNetworkHandle());
         try {
             if (add) {
-                mNetd.wakeupAddInterface(iface, prefix, mark, mask);
+                mNetd.wakeupAddInterface(iface, prefix, mWakeUpMark, mWakeUpMask);
             } else {
-                mNetd.wakeupDelInterface(iface, prefix, mark, mask);
+                mNetd.wakeupDelInterface(iface, prefix, mWakeUpMark, mWakeUpMask);
             }
         } catch (Exception e) {
             loge("Exception modifying wakeup packet monitoring: " + e);
@@ -8623,10 +8646,18 @@ public class ConnectivityService extends IConnectivityManager.Stub
     }
 
     private void maybeCloseSockets(NetworkAgentInfo nai, Set<UidRange> ranges,
-            Set<Integer> exemptUids) {
+            UidRangeParcel[] uidRangeParcels, int[] exemptUids) {
         if (nai.isVPN() && !nai.networkAgentConfig.allowBypass) {
             try {
-                mDeps.destroyLiveTcpSockets(UidRange.toIntRanges(ranges), exemptUids);
+                if (mDeps.isAtLeastU()) {
+                    final Set<Integer> exemptUidSet = new ArraySet<>();
+                    for (final int uid: exemptUids) {
+                        exemptUidSet.add(uid);
+                    }
+                    mDeps.destroyLiveTcpSockets(UidRange.toIntRanges(ranges), exemptUidSet);
+                } else {
+                    mNetd.socketDestroy(uidRangeParcels, exemptUids);
+                }
             } catch (Exception e) {
                 loge("Exception in socket destroy: ", e);
             }
@@ -8634,16 +8665,16 @@ public class ConnectivityService extends IConnectivityManager.Stub
     }
 
     private void updateVpnUidRanges(boolean add, NetworkAgentInfo nai, Set<UidRange> uidRanges) {
-        final Set<Integer> exemptUids = new ArraySet<>();
+        int[] exemptUids = new int[2];
         // TODO: Excluding VPN_UID is necessary in order to not to kill the TCP connection used
         // by PPTP. Fix this by making Vpn set the owner UID to VPN_UID instead of system when
         // starting a legacy VPN, and remove VPN_UID here. (b/176542831)
-        exemptUids.add(VPN_UID);
-        exemptUids.add(nai.networkCapabilities.getOwnerUid());
+        exemptUids[0] = VPN_UID;
+        exemptUids[1] = nai.networkCapabilities.getOwnerUid();
         UidRangeParcel[] ranges = toUidRangeStableParcels(uidRanges);
 
         // Close sockets before modifying uid ranges so that RST packets can reach to the server.
-        maybeCloseSockets(nai, uidRanges, exemptUids);
+        maybeCloseSockets(nai, uidRanges, ranges, exemptUids);
         try {
             if (add) {
                 mNetd.networkAddUidRangesParcel(new NativeUidRangeConfig(
@@ -8657,7 +8688,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
                     " on netId " + nai.network.netId + ". " + e);
         }
         // Close sockets that established connection while requesting netd.
-        maybeCloseSockets(nai, uidRanges, exemptUids);
+        maybeCloseSockets(nai, uidRanges, ranges, exemptUids);
     }
 
     private boolean isProxySetOnAnyDefaultNetwork() {
