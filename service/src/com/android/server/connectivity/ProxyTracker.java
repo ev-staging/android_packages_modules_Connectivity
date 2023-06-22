@@ -86,7 +86,6 @@ public class ProxyTracker {
 
     private final Handler mConnectivityServiceHandler;
 
-    @Nullable
     private final PacProxyManager mPacProxyManager;
 
     private class PacProxyInstalledListener implements PacProxyManager.PacProxyInstalledListener {
@@ -110,11 +109,9 @@ public class ProxyTracker {
         mConnectivityServiceHandler = connectivityServiceInternalHandler;
         mPacProxyManager = context.getSystemService(PacProxyManager.class);
 
-        if (mPacProxyManager != null) {
-            PacProxyInstalledListener listener = new PacProxyInstalledListener(pacChangedEvent);
-            mPacProxyManager.addPacProxyInstalledListener(
+        PacProxyInstalledListener listener = new PacProxyInstalledListener(pacChangedEvent);
+        mPacProxyManager.addPacProxyInstalledListener(
                 mConnectivityServiceHandler::post, listener);
-        }
     }
 
     // Convert empty ProxyInfo's to null as null-checks are used to determine if proxies are present
@@ -208,7 +205,7 @@ public class ProxyTracker {
                 mGlobalProxy = proxyProperties;
             }
 
-            if (!TextUtils.isEmpty(pacFileUrl) && mPacProxyManager != null) {
+            if (!TextUtils.isEmpty(pacFileUrl)) {
                 mConnectivityServiceHandler.post(
                         () -> mPacProxyManager.setCurrentProxyScriptUrl(proxyProperties));
             }
@@ -254,10 +251,7 @@ public class ProxyTracker {
         final ProxyInfo defaultProxy = getDefaultProxy();
         final ProxyInfo proxyInfo = null != defaultProxy ?
                 defaultProxy : ProxyInfo.buildDirectProxy("", 0, Collections.emptyList());
-
-        if (mPacProxyManager != null) {
-            mPacProxyManager.setCurrentProxyScriptUrl(proxyInfo);
-        }
+        mPacProxyManager.setCurrentProxyScriptUrl(proxyInfo);
 
         if (!shouldSendBroadcast(proxyInfo)) {
             return;

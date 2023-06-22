@@ -132,6 +132,7 @@ public class ChreDiscoveryProvider extends AbstractDiscoveryProvider {
     protected void onSetScanFilters(List<ScanFilter> filters) {
         synchronized (mLock) {
             mScanFilters = filters == null ? null : List.copyOf(filters);
+            updateFiltersLocked();
         }
     }
 

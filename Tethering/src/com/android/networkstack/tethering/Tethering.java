@@ -157,7 +157,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -1846,12 +1845,11 @@ public class Tethering {
 
             setUpstreamNetwork(ns);
             final Network newUpstream = (ns != null) ? ns.network : null;
-            if (!Objects.equals(mTetherUpstream, newUpstream)) {
+            if (mTetherUpstream != newUpstream) {
                 mTetherUpstream = newUpstream;
                 reportUpstreamChanged(mTetherUpstream);
-                // Need to notify capabilities change after upstream network changed because
-                // upstream may switch to existing network which don't have
-                // UpstreamNetworkMonitor.EVENT_ON_CAPABILITIES callback.
+                // Need to notify capabilities change after upstream network changed because new
+                // network's capabilities should be checked every time.
                 mNotificationUpdater.onUpstreamCapabilitiesChanged(
                         (ns != null) ? ns.networkCapabilities : null);
             }
