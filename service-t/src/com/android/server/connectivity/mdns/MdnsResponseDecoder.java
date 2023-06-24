@@ -25,10 +25,10 @@ import android.util.ArraySet;
 import android.util.Pair;
 
 import com.android.server.connectivity.mdns.util.MdnsLogger;
+import com.android.server.connectivity.mdns.util.MdnsUtils;
 
 import java.io.EOFException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 
@@ -52,7 +52,7 @@ public class MdnsResponseDecoder {
             List<MdnsResponse> responses, String[] pointer) {
         if (responses != null) {
             for (MdnsResponse response : responses) {
-                if (Arrays.equals(response.getServiceName(), pointer)) {
+                if (MdnsUtils.equalsDnsLabelIgnoreDnsCase(response.getServiceName(), pointer)) {
                     return response;
                 }
             }
@@ -68,7 +68,8 @@ public class MdnsResponseDecoder {
                 if (serviceRecord == null) {
                     continue;
                 }
-                if (Arrays.equals(serviceRecord.getServiceHost(), hostName)) {
+                if (MdnsUtils.equalsDnsLabelIgnoreDnsCase(serviceRecord.getServiceHost(),
+                        hostName)) {
                     return response;
                 }
             }
@@ -174,11 +175,8 @@ public class MdnsResponseDecoder {
         for (MdnsRecord record : records) {
             if (record instanceof MdnsPointerRecord) {
                 String[] name = record.getName();
-                if ((serviceType == null)
-                        || Arrays.equals(name, serviceType)
-                        || ((name.length == (serviceType.length + 2))
-                        && name[1].equals(MdnsConstants.SUBTYPE_LABEL)
-                        && MdnsRecord.labelsAreSuffix(serviceType, name))) {
+                if ((serviceType == null) || MdnsUtils.typeEqualsOrIsSubtype(
+                        serviceType, name)) {
                     MdnsPointerRecord pointerRecord = (MdnsPointerRecord) record;
                     // Group PTR records that refer to the same service instance name into a single
                     // response.
@@ -323,7 +321,7 @@ public class MdnsResponseDecoder {
             if (serviceRecord == null) {
                 continue;
             }
-            if (Arrays.equals(serviceRecord.getServiceHost(), hostName)) {
+            if (MdnsUtils.equalsDnsLabelIgnoreDnsCase(serviceRecord.getServiceHost(), hostName)) {
                 if (result == null) {
                     result = new ArrayList<>(/* initialCapacity= */ responses.size());
                 }
