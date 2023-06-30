@@ -847,7 +847,7 @@ public class ConnectivityManagerTest {
         assumeTrue(mPackageManager.hasSystemFeature(FEATURE_WIFI));
         assumeTrue(mPackageManager.hasSystemFeature(FEATURE_TELEPHONY));
 
-        Network wifiNetwork = mCtsNetUtils.connectToWifi();
+        Network wifiNetwork = mCtsNetUtils.ensureWifiConnected();
         Network cellNetwork = mCtsNetUtils.connectToCell();
         // This server returns the requestor's IP address as the response body.
         URL url = new URL("http://google-ipv6test.appspot.com/ip.js?fmt=text");
@@ -3152,7 +3152,8 @@ public class ConnectivityManagerTest {
     }
 
     @AppModeFull(reason = "Need WiFi support to test the default active network")
-    @Test
+    // NetworkActivityTracker is not mainlined before S.
+    @Test @DevSdkIgnoreRule.IgnoreUpTo(Build.VERSION_CODES.R)
     public void testDefaultNetworkActiveListener() throws Exception {
         final boolean supportWifi = mPackageManager.hasSystemFeature(FEATURE_WIFI);
         final boolean supportTelephony = mPackageManager.hasSystemFeature(FEATURE_TELEPHONY);
@@ -3236,7 +3237,8 @@ public class ConnectivityManagerTest {
             newMobileDataPreferredUids.add(uid);
             ConnectivitySettingsManager.setMobileDataPreferredUids(
                     mContext, newMobileDataPreferredUids);
-            waitForAvailable(defaultTrackingCb, cellNetwork);
+            defaultTrackingCb.eventuallyExpect(CallbackEntry.AVAILABLE, NETWORK_CALLBACK_TIMEOUT_MS,
+                    entry -> cellNetwork.equals(entry.getNetwork()));
             // No change for system default network. Expect no callback except CapabilitiesChanged
             // or LinkPropertiesChanged which may be triggered randomly from wifi network.
             assertNoCallbackExceptCapOrLpChange(systemDefaultCb);
@@ -3248,7 +3250,8 @@ public class ConnectivityManagerTest {
             newMobileDataPreferredUids.remove(uid);
             ConnectivitySettingsManager.setMobileDataPreferredUids(
                     mContext, newMobileDataPreferredUids);
-            waitForAvailable(defaultTrackingCb, wifiNetwork);
+            defaultTrackingCb.eventuallyExpect(CallbackEntry.AVAILABLE, NETWORK_CALLBACK_TIMEOUT_MS,
+                    entry -> wifiNetwork.equals(entry.getNetwork()));
             // No change for system default network. Expect no callback except CapabilitiesChanged
             // or LinkPropertiesChanged which may be triggered randomly from wifi network.
             assertNoCallbackExceptCapOrLpChange(systemDefaultCb);
