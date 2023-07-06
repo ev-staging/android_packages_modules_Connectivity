@@ -173,6 +173,10 @@ java_sdk_library {
         "//packages/modules/IPsec/tests/iketests",
         "//packages/modules/NetworkStack/tests:__subpackages__",
         "//packages/modules/Wifi/service/tests/wifitests",
+
+        // KEYSTONE(I85dc5dae4e72503b9d38b5cff93689661f627d7a,b/187917026)
+        // Vendor libs using hidden APIs
+        "//vendor:__subpackages__",
     ],
 }
 
