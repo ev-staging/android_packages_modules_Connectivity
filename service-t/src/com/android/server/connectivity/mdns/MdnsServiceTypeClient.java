@@ -58,7 +58,7 @@ public class MdnsServiceTypeClient {
     private final MdnsSocketClientBase socketClient;
     private final MdnsResponseDecoder responseDecoder;
     private final ScheduledExecutorService executor;
-    @Nullable private final Network network;
+    @NonNull private final SocketKey socketKey;
     @NonNull private final SharedLog sharedLog;
     private final Object lock = new Object();
     private final ArrayMap<MdnsServiceBrowserListener, MdnsSearchOptions> listeners =
@@ -90,9 +90,9 @@ public class MdnsServiceTypeClient {
             @NonNull String serviceType,
             @NonNull MdnsSocketClientBase socketClient,
             @NonNull ScheduledExecutorService executor,
-            @Nullable Network network,
+            @NonNull SocketKey socketKey,
             @NonNull SharedLog sharedLog) {
-        this(serviceType, socketClient, executor, new MdnsResponseDecoder.Clock(), network,
+        this(serviceType, socketClient, executor, new MdnsResponseDecoder.Clock(), socketKey,
                 sharedLog);
     }
 
@@ -102,7 +102,7 @@ public class MdnsServiceTypeClient {
             @NonNull MdnsSocketClientBase socketClient,
             @NonNull ScheduledExecutorService executor,
             @NonNull MdnsResponseDecoder.Clock clock,
-            @Nullable Network network,
+            @NonNull SocketKey socketKey,
             @NonNull SharedLog sharedLog) {
         this.serviceType = serviceType;
         this.socketClient = socketClient;
@@ -110,7 +110,7 @@ public class MdnsServiceTypeClient {
         this.serviceTypeLabels = TextUtils.split(serviceType, "\\.");
         this.responseDecoder = new MdnsResponseDecoder(clock, serviceTypeLabels);
         this.clock = clock;
-        this.network = network;
+        this.socketKey = socketKey;
         this.sharedLog = sharedLog;
     }
 
@@ -191,15 +191,16 @@ public class MdnsServiceTypeClient {
             }
             // Cancel the next scheduled periodical task.
             if (requestTaskFuture != null) {
-                requestTaskFuture.cancel(true);
+                cancelRequestTaskLocked();
             }
             // Keep tracking the ScheduledFuture for the task so we can cancel it if caller is not
             // interested anymore.
             final QueryTaskConfig taskConfig = new QueryTaskConfig(
                     searchOptions.getSubtypes(),
                     searchOptions.isPassiveMode(),
-                    ++currentSessionId,
-                    network);
+                    searchOptions.onlyUseIpv6OnIpv6OnlyNetworks(),
+                    currentSessionId,
+                    socketKey);
             if (hadReply) {
                 requestTaskFuture = scheduleNextRunLocked(taskConfig);
             } else {
@@ -208,12 +209,19 @@ public class MdnsServiceTypeClient {
         }
     }
 
+    @GuardedBy("lock")
+    private void cancelRequestTaskLocked() {
+        requestTaskFuture.cancel(true);
+        ++currentSessionId;
+        requestTaskFuture = null;
+    }
+
     private boolean responseMatchesOptions(@NonNull MdnsResponse response,
             @NonNull MdnsSearchOptions options) {
         final boolean matchesInstanceName = options.getResolveInstanceName() == null
                 // DNS is case-insensitive, so ignore case in the comparison
                 || MdnsUtils.equalsIgnoreDnsCase(options.getResolveInstanceName(),
-                        response.getServiceInstanceName());
+                response.getServiceInstanceName());
 
         // If discovery is requiring some subtypes, the response must have one that matches a
         // requested one.
@@ -241,8 +249,7 @@ public class MdnsServiceTypeClient {
                 return listeners.isEmpty();
             }
             if (listeners.isEmpty() && requestTaskFuture != null) {
-                requestTaskFuture.cancel(true);
-                requestTaskFuture = null;
+                cancelRequestTaskLocked();
             }
             return listeners.isEmpty();
         }
@@ -319,8 +326,7 @@ public class MdnsServiceTypeClient {
             }
 
             if (requestTaskFuture != null) {
-                requestTaskFuture.cancel(true);
-                requestTaskFuture = null;
+                cancelRequestTaskLocked();
             }
         }
     }
@@ -343,6 +349,11 @@ public class MdnsServiceTypeClient {
             boolean after = response.isComplete();
             serviceBecomesComplete = !before && after;
         }
+        sharedLog.i(String.format(
+                "Handling response from service: %s, newServiceFound: %b, serviceBecomesComplete:"
+                        + " %b, responseIsComplete: %b",
+                serviceInstanceName, newServiceFound, serviceBecomesComplete,
+                response.isComplete()));
         MdnsServiceInfo serviceInfo =
                 buildMdnsServiceInfoFromResponse(response, serviceTypeLabels);
 
@@ -417,6 +428,7 @@ public class MdnsServiceTypeClient {
         private final boolean alwaysAskForUnicastResponse =
                 MdnsConfigs.alwaysAskForUnicastResponseInEachBurst();
         private final boolean usePassiveMode;
+        private final boolean onlyUseIpv6OnIpv6OnlyNetworks;
         private final long sessionId;
         @VisibleForTesting
         int transactionId;
@@ -427,11 +439,15 @@ public class MdnsServiceTypeClient {
         private int burstCounter;
         private int timeToRunNextTaskInMs;
         private boolean isFirstBurst;
-        @Nullable private final Network network;
+        @NonNull private final SocketKey socketKey;
 
-        QueryTaskConfig(@NonNull Collection<String> subtypes, boolean usePassiveMode,
-                long sessionId, @Nullable Network network) {
+        QueryTaskConfig(@NonNull Collection<String> subtypes,
+                boolean usePassiveMode,
+                boolean onlyUseIpv6OnIpv6OnlyNetworks,
+                long sessionId,
+                @Nullable SocketKey socketKey) {
             this.usePassiveMode = usePassiveMode;
+            this.onlyUseIpv6OnIpv6OnlyNetworks = onlyUseIpv6OnIpv6OnlyNetworks;
             this.subtypes = new ArrayList<>(subtypes);
             this.queriesPerBurst = QUERIES_PER_BURST;
             this.burstCounter = 0;
@@ -452,7 +468,7 @@ public class MdnsServiceTypeClient {
                 // doubles until it maxes out at TIME_BETWEEN_BURSTS_MS.
                 this.timeBetweenBurstsInMs = INITIAL_TIME_BETWEEN_BURSTS_MS;
             }
-            this.network = network;
+            this.socketKey = socketKey;
         }
 
         QueryTaskConfig getConfigForNextRun() {
@@ -535,7 +551,7 @@ public class MdnsServiceTypeClient {
                 // Only the names are used to know which queries to send, other parameters like
                 // interfaceIndex do not matter.
                 servicesToResolve = makeResponsesForResolve(
-                        0 /* interfaceIndex */, config.network);
+                        0 /* interfaceIndex */, config.socketKey.getNetwork());
                 sendDiscoveryQueries = servicesToResolve.size() < listeners.size();
             }
             Pair<Integer, List<String>> result;
@@ -548,7 +564,8 @@ public class MdnsServiceTypeClient {
                                 config.subtypes,
                                 config.expectUnicastResponse,
                                 config.transactionId,
-                                config.network,
+                                config.socketKey.getNetwork(),
+                                config.onlyUseIpv6OnIpv6OnlyNetworks,
                                 sendDiscoveryQueries,
                                 servicesToResolve,
                                 clock)

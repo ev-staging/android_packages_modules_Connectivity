@@ -278,32 +278,6 @@ public class MdnsResponseTests {
     }
 
     @Test
-    public void dropUnmatchedAddressRecords_caseInsensitive() {
-
-        final String[] hostname = new String[] { "MyHostname" };
-        final String[] upperCaseHostName = new String[] { "MYHOSTNAME" };
-        final String[] serviceName = new String[] { "MyService", "_type", "_tcp", "local" };
-        final String[] serviceType = new String[] { "_type", "_tcp", "local" };
-        final MdnsResponse response = new MdnsResponse(/* now= */ 0, serviceName, INTERFACE_INDEX,
-                mNetwork);
-        response.addPointerRecord(new MdnsPointerRecord(serviceType, 0L /* receiptTimeMillis */,
-                false /* cacheFlush */, TEST_TTL_MS, serviceName));
-        response.setServiceRecord(new MdnsServiceRecord(serviceName, 0L /* receiptTimeMillis */,
-                true /* cacheFlush */, TEST_TTL_MS, 0 /* servicePriority */,
-                0 /* serviceWeight */, 0 /* servicePort */, hostname));
-        response.setTextRecord(new MdnsTextRecord(serviceName, 0L /* receiptTimeMillis */,
-                true /* cacheFlush */, TEST_TTL_MS, emptyList() /* entries */));
-        response.addInet4AddressRecord(new MdnsInetAddressRecord(
-                upperCaseHostName , 0L /* receiptTimeMillis */, true /* cacheFlush */,
-                TEST_TTL_MS, parseNumericAddress("192.0.2.123")));
-        response.addInet6AddressRecord(new MdnsInetAddressRecord(
-                upperCaseHostName, 0L /* receiptTimeMillis */, true /* cacheFlush */,
-                TEST_TTL_MS, parseNumericAddress("2001:db8::123")));
-
-        assertFalse(response.dropUnmatchedAddressRecords());
-    }
-
-    @Test
     public void addRecords_receiptTimeChange() {
         final MdnsResponse response = makeCompleteResponse(TEST_TTL_MS, 0 /* receiptTimeMillis */);
         final MdnsResponse receiptTimeChangedResponse = makeCompleteResponse(TEST_TTL_MS,
@@ -341,5 +315,31 @@ public class MdnsResponseTests {
 
         // All records were replaced, not added
         assertEquals(receiptTimeChangedResponse.getRecords().size(), response.getRecords().size());
+    }
+
+    @Test
+    public void dropUnmatchedAddressRecords_caseInsensitive() {
+
+        final String[] hostname = new String[] { "MyHostname" };
+        final String[] upperCaseHostName = new String[] { "MYHOSTNAME" };
+        final String[] serviceName = new String[] { "MyService", "_type", "_tcp", "local" };
+        final String[] serviceType = new String[] { "_type", "_tcp", "local" };
+        final MdnsResponse response = new MdnsResponse(/* now= */ 0, serviceName, INTERFACE_INDEX,
+                mNetwork);
+        response.addPointerRecord(new MdnsPointerRecord(serviceType, 0L /* receiptTimeMillis */,
+                false /* cacheFlush */, TEST_TTL_MS, serviceName));
+        response.setServiceRecord(new MdnsServiceRecord(serviceName, 0L /* receiptTimeMillis */,
+                true /* cacheFlush */, TEST_TTL_MS, 0 /* servicePriority */,
+                0 /* serviceWeight */, 0 /* servicePort */, hostname));
+        response.setTextRecord(new MdnsTextRecord(serviceName, 0L /* receiptTimeMillis */,
+                true /* cacheFlush */, TEST_TTL_MS, emptyList() /* entries */));
+        response.addInet4AddressRecord(new MdnsInetAddressRecord(
+                upperCaseHostName , 0L /* receiptTimeMillis */, true /* cacheFlush */,
+                TEST_TTL_MS, parseNumericAddress("192.0.2.123")));
+        response.addInet6AddressRecord(new MdnsInetAddressRecord(
+                upperCaseHostName, 0L /* receiptTimeMillis */, true /* cacheFlush */,
+                TEST_TTL_MS, parseNumericAddress("2001:db8::123")));
+
+        assertFalse(response.dropUnmatchedAddressRecords());
     }
 }
