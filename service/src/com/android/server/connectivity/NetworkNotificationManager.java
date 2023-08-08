@@ -322,10 +322,7 @@ public class NetworkNotificationManager {
 
     private boolean maybeNotifyViaDialog(Resources res, NotificationType notifyType,
             PendingIntent intent) {
-        final boolean activelyPreferBadWifi = SdkLevel.isAtLeastU()
-                || (SdkLevel.isAtLeastT()
-                        && res.getInteger(R.integer.config_activelyPreferBadWifi) == 1);
-        if ((notifyType != NotificationType.LOST_INTERNET || !activelyPreferBadWifi)
+        if (notifyType != NotificationType.LOST_INTERNET
                 && notifyType != NotificationType.NO_INTERNET
                 && notifyType != NotificationType.PARTIAL_CONNECTIVITY) {
             return false;

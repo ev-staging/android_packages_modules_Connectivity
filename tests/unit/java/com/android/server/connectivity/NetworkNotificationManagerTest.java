@@ -390,63 +390,28 @@ public class NetworkNotificationManagerTest {
     private static final int EXPECT_DIALOG = 0;
     private static final int EXPECT_NOTIFICATION = 1;
     @Test
-    public void testNotifyNoInternet_asNotification_ActivelyPrefer() throws Exception {
-        doTestNotifyNotificationAsDialogWhenHighPriority(false /* notifyAsDialog */,
-                true /* activelyPreferBadWifi */, NO_INTERNET, EXPECT_NOTIFICATION);
+    public void testNotifyNoInternet_asNotification() throws Exception {
+        doTestNotifyNotificationAsDialogWhenHighPriority(false, NO_INTERNET);
+    }
+    @Test
+        public void testNotifyNoInternet_asDialog() throws Exception {
+        doTestNotifyNotificationAsDialogWhenHighPriority(true, NO_INTERNET);
     }
 
     @Test
-    public void testNotifyNoInternet_asNotification_NotActivelyPrefer() throws Exception {
-        doTestNotifyNotificationAsDialogWhenHighPriority(false /* notifyAsDialog */,
-                false /* activelyPreferBadWifi */, NO_INTERNET, EXPECT_NOTIFICATION);
+    public void testNotifyLostInternet_asNotification() throws Exception {
+        doTestNotifyNotificationAsDialogWhenHighPriority(false, LOST_INTERNET);
     }
 
     @Test
-    public void testNotifyNoInternet_asDialog_ActivelyPrefer() throws Exception {
-        doTestNotifyNotificationAsDialogWhenHighPriority(true /* notifyAsDialog */,
-                true /* activelyPreferBadWifi */, NO_INTERNET, EXPECT_DIALOG);
+    public void testNotifyLostInternet_asDialog() throws Exception {
+        doTestNotifyNotificationAsDialogWhenHighPriority(true, LOST_INTERNET);
     }
 
-    @Test
-    public void testNotifyNoInternet_asDialog_NotActivelyPrefer() throws Exception {
-        doTestNotifyNotificationAsDialogWhenHighPriority(true /* notifyAsDialog */,
-                false /* activelyPreferBadWifi */, NO_INTERNET, EXPECT_DIALOG);
-    }
-
-    @Test
-    public void testNotifyLostInternet_asNotification_ActivelyPrefer() throws Exception {
-        doTestNotifyNotificationAsDialogWhenHighPriority(false /* notifyAsDialog */,
-                true /* activelyPreferBadWifi */, LOST_INTERNET, EXPECT_NOTIFICATION);
-    }
-
-    @Test
-    public void testNotifyLostInternet_asNotification_NotActivelyPrefer() throws Exception {
-        doTestNotifyNotificationAsDialogWhenHighPriority(false /* notifyAsDialog */,
-                false /* activelyPreferBadWifi */, LOST_INTERNET, EXPECT_NOTIFICATION);
-    }
-
-    @Test
-    public void testNotifyLostInternet_asDialog_ActivelyPrefer() throws Exception {
-        doTestNotifyNotificationAsDialogWhenHighPriority(true /* notifyAsDialog */,
-                true /* activelyPreferBadWifi */, LOST_INTERNET,
-                SdkLevel.isAtLeastT() ? EXPECT_DIALOG : EXPECT_NOTIFICATION);
-    }
-
-    @Test
-    public void testNotifyLostInternet_asDialog_NotActivelyPrefer() throws Exception {
-        doTestNotifyNotificationAsDialogWhenHighPriority(true /* notifyAsDialog */,
-                false /* activelyPreferBadWifi */, LOST_INTERNET,
-                SdkLevel.isAtLeastU() ? EXPECT_DIALOG : EXPECT_NOTIFICATION);
-    }
-
-    // Pass EXPECT_DIALOG or EXPECT_NOTIFICATION to |expectBehavior|
-    public void doTestNotifyNotificationAsDialogWhenHighPriority(
-            final boolean notifyAsDialog, final boolean activelyPreferBadWifi,
-            @NonNull final NotificationType notifType, final int expectBehavior) throws Exception {
-        doReturn(notifyAsDialog).when(mResources).getBoolean(
+    public void doTestNotifyNotificationAsDialogWhenHighPriority(final boolean configActive,
+            @NonNull final NotificationType notifType) throws Exception {
+        doReturn(configActive).when(mResources).getBoolean(
                 R.bool.config_notifyNoInternetAsDialogWhenHighPriority);
-        doReturn(activelyPreferBadWifi ? 1 : 0).when(mResources).getInteger(
-                R.integer.config_activelyPreferBadWifi);
 
         final Instrumentation instr = InstrumentationRegistry.getInstrumentation();
         final UiDevice uiDevice =  UiDevice.getInstance(instr);
@@ -494,7 +459,7 @@ public class NetworkNotificationManagerTest {
             verify(mNotificationManager).cancel(TEST_NOTIF_TAG, NETWORK_SWITCH.eventId);
         }
 
-        if (expectBehavior == EXPECT_DIALOG) {
+        if (configActive) {
             // Verify that the activity is shown (the activity shows the action on screen)
             final UiObject actionText = uiDevice.findObject(new UiSelector().text(testAction));
             assertTrue("Activity not shown", actionText.waitForExists(TEST_TIMEOUT_MS));

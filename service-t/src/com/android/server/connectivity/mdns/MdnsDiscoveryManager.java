@@ -194,7 +194,7 @@ public class MdnsDiscoveryManager implements MdnsSocketClientBase.Callback {
                     }
 
                     @Override
-                    public void onAllSocketsDestroyed(@NonNull SocketKey socketKey) {
+                    public void onSocketDestroyed(@NonNull SocketKey socketKey) {
                         ensureRunningOnHandlerThread(handler);
                         final MdnsServiceTypeClient serviceTypeClient =
                                 perSocketServiceTypeClients.get(serviceType, socketKey);
@@ -254,8 +254,7 @@ public class MdnsDiscoveryManager implements MdnsSocketClientBase.Callback {
     private void handleOnResponseReceived(@NonNull MdnsPacket packet,
             @NonNull SocketKey socketKey) {
         for (MdnsServiceTypeClient serviceTypeClient : getMdnsServiceTypeClient(socketKey)) {
-            serviceTypeClient.processResponse(
-                    packet, socketKey.getInterfaceIndex(), socketKey.getNetwork());
+            serviceTypeClient.processResponse(packet, socketKey);
         }
     }
 
@@ -285,9 +284,11 @@ public class MdnsDiscoveryManager implements MdnsSocketClientBase.Callback {
     MdnsServiceTypeClient createServiceTypeClient(@NonNull String serviceType,
             @NonNull SocketKey socketKey) {
         sharedLog.log("createServiceTypeClient for type:" + serviceType + " " + socketKey);
+        final String tag = serviceType + "-" + socketKey.getNetwork()
+                + "/" + socketKey.getInterfaceIndex();
         return new MdnsServiceTypeClient(
                 serviceType, socketClient,
                 executorProvider.newServiceTypeClientSchedulerExecutor(), socketKey,
-                sharedLog.forSubComponent(serviceType + "-" + socketKey));
+                sharedLog.forSubComponent(tag), handler.getLooper());
     }
 }
