@@ -2744,7 +2744,6 @@ public class ConnectivityManagerTest {
      */
     @AppModeFull(reason = "Instant apps cannot create test networks")
     @Test
-    @SkipMainlinePresubmit(reason = "Out of SLO flakiness")
     public void testSetOemNetworkPreferenceForTestOnlyPref() throws Exception {
         // Cannot use @IgnoreUpTo(Build.VERSION_CODES.R) because this test also requires API 31
         // shims, and @IgnoreUpTo does not check that.
@@ -3207,7 +3206,6 @@ public class ConnectivityManagerTest {
 
     @AppModeFull(reason = "Cannot get WifiManager in instant app mode")
     @Test
-    @SkipPresubmit(reason = "Out of SLO flakiness")
     public void testMobileDataPreferredUids() throws Exception {
         assumeTrue(TestUtils.shouldTestSApis());
         final boolean canRunTest = mPackageManager.hasSystemFeature(FEATURE_WIFI)
