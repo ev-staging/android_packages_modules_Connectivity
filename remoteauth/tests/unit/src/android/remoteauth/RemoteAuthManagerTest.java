@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 The Android Open Source Project
+ * Copyright (C) 2023 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,29 +14,25 @@
  * limitations under the License.
  */
 
-package com.android.server.connectivity.mdns;
+package android.remoteauth;
 
-/**
- * The interface for netlink monitor.
- */
-public interface AbstractSocketNetlink {
+import static org.junit.Assert.assertTrue;
 
-    /**
-     * Returns if the netlink monitor is supported or not. By default, it is not supported.
-     */
-    default boolean isSupported() {
-        return false;
-    }
+import android.platform.test.annotations.Presubmit;
 
-    /**
-     * Starts the monitor.
-     */
-    default void startMonitoring() {
-    }
+import androidx.test.ext.junit.runners.AndroidJUnit4;
+import androidx.test.filters.SmallTest;
 
-    /**
-     * Stops the monitor.
-     */
-    default void stopMonitoring() {
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+/** Unit tests for {@link RemoteAuth}. */
+@Presubmit
+@SmallTest
+@RunWith(AndroidJUnit4.class)
+public class RemoteAuthManagerTest {
+    @Test
+    public void testStub() {
+        assertTrue(true);
     }
 }

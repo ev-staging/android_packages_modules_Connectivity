@@ -332,12 +332,18 @@ public class AutomaticOnOffKeepaliveTracker {
 
         final long time = mDependencies.getElapsedRealtime();
         mMetricsWriteTimeBase = time % METRICS_COLLECTION_DURATION_MS;
-        final long triggerAtMillis = mMetricsWriteTimeBase + METRICS_COLLECTION_DURATION_MS;
-        mAlarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAtMillis, TAG,
-                this::writeMetricsAndRescheduleAlarm, handler);
+        if (mKeepaliveStatsTracker.isEnabled()) {
+            final long triggerAtMillis = mMetricsWriteTimeBase + METRICS_COLLECTION_DURATION_MS;
+            mAlarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAtMillis, TAG,
+                    this::writeMetricsAndRescheduleAlarm, handler);
+        }
     }
 
     private void writeMetricsAndRescheduleAlarm() {
+        // If the metrics is disabled, skip writing and scheduling the next alarm.
+        if (!mKeepaliveStatsTracker.isEnabled()) {
+            return;
+        }
         mKeepaliveStatsTracker.writeAndResetMetrics();
 
         final long time = mDependencies.getElapsedRealtime();
@@ -495,8 +501,11 @@ public class AutomaticOnOffKeepaliveTracker {
         final AutomaticOnOffKeepalive autoKi;
         try {
             autoKi = target.withKeepaliveInfo(res.second);
-            // Close the duplicated fd.
-            target.close();
+            // Only automatic keepalives duplicate the fd.
+            if (target.mAutomaticOnOffState != STATE_ALWAYS_ON) {
+                // Close the duplicated fd.
+                target.close();
+            }
         } catch (InvalidSocketException e) {
             Log.wtf(TAG, "Fail to create AutomaticOnOffKeepalive", e);
             return;
