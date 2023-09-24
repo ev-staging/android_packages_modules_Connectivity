@@ -76,7 +76,6 @@ import androidx.test.uiautomator.UiSelector;
 import androidx.test.uiautomator.Until;
 
 import com.android.connectivity.resources.R;
-import com.android.modules.utils.build.SdkLevel;
 import com.android.server.connectivity.NetworkNotificationManager.NotificationType;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRunner;
@@ -389,8 +388,6 @@ public class NetworkNotificationManagerTest {
         verify(mNotificationManager, never()).cancel(eq(tag), eq(PARTIAL_CONNECTIVITY.eventId));
     }
 
-    private static final int EXPECT_DIALOG = 0;
-    private static final int EXPECT_NOTIFICATION = 1;
     @Test
     public void testNotifyNoInternet_asNotification() throws Exception {
         doTestNotifyNotificationAsDialogWhenHighPriority(false, NO_INTERNET);
