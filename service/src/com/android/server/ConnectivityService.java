@@ -1876,6 +1876,10 @@ public class ConnectivityService extends IConnectivityManager.Stub
             activityManager.registerUidFrozenStateChangedCallback(
                     (Runnable r) -> r.run(), frozenStateChangedCallback);
         }
+
+        if (mDeps.isFeatureNotChickenedOut(mContext, LOG_BPF_RC)) {
+            mHandler.post(BpfLoaderRcUtils::checkBpfLoaderRc);
+        }
     }
 
     /**
@@ -2651,7 +2655,6 @@ public class ConnectivityService extends IConnectivityManager.Stub
 
     private boolean canSeeAllowedUids(final int pid, final int uid, final int netOwnerUid) {
         return Process.SYSTEM_UID == uid
-                || netOwnerUid == uid
                 || checkAnyPermissionOf(mContext, pid, uid,
                         android.Manifest.permission.NETWORK_FACTORY);
     }
@@ -3334,6 +3337,8 @@ public class ConnectivityService extends IConnectivityManager.Stub
     @VisibleForTesting
     public static final String ALLOW_SYSUI_CONNECTIVITY_REPORTS =
             "allow_sysui_connectivity_reports";
+
+    public static final String LOG_BPF_RC = "log_bpf_rc_force_disable";
 
     private void enforceInternetPermission() {
         mContext.enforceCallingOrSelfPermission(
