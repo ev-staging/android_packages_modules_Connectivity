@@ -1981,56 +1981,36 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         if (callingUid != android.os.Process.SYSTEM_UID && callingUid != uid) {
             return UNSUPPORTED;
         }
-        return getEntryValueForType(nativeGetUidStat(uid), type);
+        return nativeGetUidStat(uid, type);
     }
 
     @Override
     public long getIfaceStats(@NonNull String iface, int type) {
         Objects.requireNonNull(iface);
-        final NetworkStats.Entry entry = nativeGetIfaceStat(iface);
-        final long value = getEntryValueForType(entry, type);
-        if (value == UNSUPPORTED) {
-            return UNSUPPORTED;
+        long nativeIfaceStats = nativeGetIfaceStat(iface, type);
+        if (nativeIfaceStats == -1) {
+            return nativeIfaceStats;
         } else {
             // When tethering offload is in use, nativeIfaceStats does not contain usage from
             // offload, add it back here. Note that the included statistics might be stale
             // since polling newest stats from hardware might impact system health and not
             // suitable for TrafficStats API use cases.
-            entry.add(getProviderIfaceStats(iface));
-            return getEntryValueForType(entry, type);
-        }
-    }
-
-    private long getEntryValueForType(@Nullable NetworkStats.Entry entry, int type) {
-        if (entry == null) return UNSUPPORTED;
-        switch (type) {
-            case TrafficStats.TYPE_RX_BYTES:
-                return entry.rxBytes;
-            case TrafficStats.TYPE_TX_BYTES:
-                return entry.txBytes;
-            case TrafficStats.TYPE_RX_PACKETS:
-                return entry.rxPackets;
-            case TrafficStats.TYPE_TX_PACKETS:
-                return entry.txPackets;
-            default:
-                return UNSUPPORTED;
+            return nativeIfaceStats + getProviderIfaceStats(iface, type);
         }
     }
 
     @Override
     public long getTotalStats(int type) {
-        final NetworkStats.Entry entry = nativeGetTotalStat();
-        final long value = getEntryValueForType(entry, type);
-        if (value == UNSUPPORTED) {
-            return UNSUPPORTED;
+        long nativeTotalStats = nativeGetTotalStat(type);
+        if (nativeTotalStats == -1) {
+            return nativeTotalStats;
         } else {
             // Refer to comment in getIfaceStats
-            entry.add(getProviderIfaceStats(IFACE_ALL));
-            return getEntryValueForType(entry, type);
+            return nativeTotalStats + getProviderIfaceStats(IFACE_ALL, type);
         }
     }
 
-    private NetworkStats.Entry getProviderIfaceStats(@Nullable String iface) {
+    private long getProviderIfaceStats(@Nullable String iface, int type) {
         final NetworkStats providerSnapshot = getNetworkStatsFromProviders(STATS_PER_IFACE);
         final HashSet<String> limitIfaces;
         if (iface == IFACE_ALL) {
@@ -2039,7 +2019,19 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
             limitIfaces = new HashSet<>();
             limitIfaces.add(iface);
         }
-        return providerSnapshot.getTotal(null, limitIfaces);
+        final NetworkStats.Entry entry = providerSnapshot.getTotal(null, limitIfaces);
+        switch (type) {
+            case TrafficStats.TYPE_RX_BYTES:
+                return entry.rxBytes;
+            case TrafficStats.TYPE_RX_PACKETS:
+                return entry.rxPackets;
+            case TrafficStats.TYPE_TX_BYTES:
+                return entry.txBytes;
+            case TrafficStats.TYPE_TX_PACKETS:
+                return entry.txPackets;
+            default:
+                return 0;
+        }
     }
 
     /**
@@ -3406,13 +3398,10 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         }
     }
 
-    // TODO: Read stats by using BpfNetMapsReader.
-    @Nullable
-    private static native NetworkStats.Entry nativeGetTotalStat();
-    @Nullable
-    private static native NetworkStats.Entry nativeGetIfaceStat(String iface);
-    @Nullable
-    private static native NetworkStats.Entry nativeGetUidStat(int uid);
+    private static native long nativeGetTotalStat(int type);
+    private static native long nativeGetIfaceStat(String iface, int type);
+    private static native long nativeGetIfIndexStat(int ifindex, int type);
+    private static native long nativeGetUidStat(int uid, int type);
 
     /** Initializes and registers the Perfetto Network Trace data source */
     public static native void nativeInitNetworkTracing();

@@ -521,7 +521,7 @@ public class ThreadNetworkControllerTest {
     }
 
     @Test
-    public void scheduleMigration_withPrivilegedPermission_newDatasetApplied() throws Exception {
+    public void scheduleMigration_withPrivilegedPermission_success() throws Exception {
         grantPermissions(permission.ACCESS_NETWORK_STATE, PERMISSION_THREAD_NETWORK_PRIVILEGED);
 
         for (ThreadNetworkController controller : getAllControllers()) {
@@ -548,32 +548,11 @@ public class ThreadNetworkControllerTest {
 
             controller.scheduleMigration(
                     pendingDataset2, mExecutor, newOutcomeReceiver(migrateFuture));
+
             migrateFuture.get();
-
-            SettableFuture<Boolean> dataset2IsApplied = SettableFuture.create();
-            SettableFuture<Boolean> pendingDatasetIsRemoved = SettableFuture.create();
-            OperationalDatasetCallback datasetCallback =
-                    new OperationalDatasetCallback() {
-                        @Override
-                        public void onActiveOperationalDatasetChanged(
-                                ActiveOperationalDataset activeDataset) {
-                            if (activeDataset.equals(activeDataset2)) {
-                                dataset2IsApplied.set(true);
-                            }
-                        }
-
-                        @Override
-                        public void onPendingOperationalDatasetChanged(
-                                PendingOperationalDataset pendingDataset) {
-                            if (pendingDataset == null) {
-                                pendingDatasetIsRemoved.set(true);
-                            }
-                        }
-                    };
-            controller.registerOperationalDatasetCallback(directExecutor(), datasetCallback);
-            assertThat(dataset2IsApplied.get()).isTrue();
-            assertThat(pendingDatasetIsRemoved.get()).isTrue();
-            controller.unregisterOperationalDatasetCallback(datasetCallback);
+            Thread.sleep(35 * 1000);
+            assertThat(getActiveOperationalDataset(controller)).isEqualTo(activeDataset2);
+            assertThat(getPendingOperationalDataset(controller)).isNull();
         }
     }
 
@@ -650,8 +629,7 @@ public class ThreadNetworkControllerTest {
     }
 
     @Test
-    public void scheduleMigration_secondRequestHasLargerTimestamp_newDatasetApplied()
-            throws Exception {
+    public void scheduleMigration_secondRequestHasLargerTimestamp_success() throws Exception {
         grantPermissions(permission.ACCESS_NETWORK_STATE, PERMISSION_THREAD_NETWORK_PRIVILEGED);
 
         for (ThreadNetworkController controller : getAllControllers()) {
@@ -691,32 +669,11 @@ public class ThreadNetworkControllerTest {
             migrateFuture1.get();
             controller.scheduleMigration(
                     pendingDataset2, mExecutor, newOutcomeReceiver(migrateFuture2));
+
             migrateFuture2.get();
-
-            SettableFuture<Boolean> dataset2IsApplied = SettableFuture.create();
-            SettableFuture<Boolean> pendingDatasetIsRemoved = SettableFuture.create();
-            OperationalDatasetCallback datasetCallback =
-                    new OperationalDatasetCallback() {
-                        @Override
-                        public void onActiveOperationalDatasetChanged(
-                                ActiveOperationalDataset activeDataset) {
-                            if (activeDataset.equals(activeDataset2)) {
-                                dataset2IsApplied.set(true);
-                            }
-                        }
-
-                        @Override
-                        public void onPendingOperationalDatasetChanged(
-                                PendingOperationalDataset pendingDataset) {
-                            if (pendingDataset == null) {
-                                pendingDatasetIsRemoved.set(true);
-                            }
-                        }
-                    };
-            controller.registerOperationalDatasetCallback(directExecutor(), datasetCallback);
-            assertThat(dataset2IsApplied.get()).isTrue();
-            assertThat(pendingDatasetIsRemoved.get()).isTrue();
-            controller.unregisterOperationalDatasetCallback(datasetCallback);
+            Thread.sleep(35 * 1000);
+            assertThat(getActiveOperationalDataset(controller)).isEqualTo(activeDataset2);
+            assertThat(getPendingOperationalDataset(controller)).isNull();
         }
     }
 
