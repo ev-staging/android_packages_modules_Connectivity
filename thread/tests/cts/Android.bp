@@ -18,9 +18,9 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
+// TODO: add this test to the CTS test suite
 android_test {
     name: "CtsThreadNetworkTestCases",
-    defaults: ["cts_defaults"],
     min_sdk_version: "33",
     sdk_version: "test_current",
     manifest: "AndroidManifest.xml",
@@ -29,7 +29,6 @@ android_test {
         "src/**/*.java",
     ],
     test_suites: [
-        "cts",
         "general-tests",
         "mts-tethering",
     ],
@@ -37,6 +36,7 @@ android_test {
         "androidx.test.ext.junit",
         "compatibility-device-util-axt",
         "ctstestrunner-axt",
+        "guava",
         "guava-android-testlib",
         "net-tests-utils",
         "truth",
@@ -44,6 +44,7 @@ android_test {
     libs: [
         "android.test.base",
         "android.test.runner",
+        "framework-connectivity-module-api-stubs-including-flagged"
     ],
     // Test coverage system runs on different devices. Need to
     // compile for all architectures.

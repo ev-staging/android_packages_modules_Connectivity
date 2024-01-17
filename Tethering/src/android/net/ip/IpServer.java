@@ -33,7 +33,6 @@ import static android.system.OsConstants.RT_SCOPE_UNIVERSE;
 
 import static com.android.net.module.util.Inet4AddressUtils.intToInet4AddressHTH;
 import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
-import static com.android.networkstack.tethering.TetheringConfiguration.USE_SYNC_SM;
 import static com.android.networkstack.tethering.UpstreamNetworkState.isVcnInterface;
 import static com.android.networkstack.tethering.util.PrefixUtils.asIpPrefix;
 import static com.android.networkstack.tethering.util.TetheringMessageBase.BASE_IPSERVER;
@@ -239,6 +238,7 @@ public class IpServer extends StateMachineShim {
     public static final int CMD_NEW_PREFIX_REQUEST          = BASE_IPSERVER + 12;
     // request from PrivateAddressCoordinator to restart tethering.
     public static final int CMD_NOTIFY_PREFIX_CONFLICT      = BASE_IPSERVER + 13;
+    public static final int CMD_SERVICE_FAILED_TO_START     = BASE_IPSERVER + 14;
 
     private final State mInitialState;
     private final State mLocalHotspotState;
@@ -315,6 +315,7 @@ public class IpServer extends StateMachineShim {
 
     private final TetheringMetrics mTetheringMetrics;
     private final Handler mHandler;
+    private final boolean mIsSyncSM;
 
     // TODO: Add a dependency object to pass the data members or variables from the tethering
     // object. It helps to reduce the arguments of the constructor.
@@ -324,7 +325,7 @@ public class IpServer extends StateMachineShim {
             @Nullable LateSdk<RoutingCoordinatorManager> routingCoordinator, Callback callback,
             TetheringConfiguration config, PrivateAddressCoordinator addressCoordinator,
             TetheringMetrics tetheringMetrics, Dependencies deps) {
-        super(ifaceName, USE_SYNC_SM ? null : handler.getLooper());
+        super(ifaceName, config.isSyncSM() ? null : handler.getLooper());
         mHandler = handler;
         mLog = log.forSubComponent(ifaceName);
         mNetd = netd;
@@ -337,6 +338,7 @@ public class IpServer extends StateMachineShim {
         mLinkProperties = new LinkProperties();
         mUsingLegacyDhcp = config.useLegacyDhcpServer();
         mP2pLeasesSubnetPrefixLength = config.getP2pLeasesSubnetPrefixLength();
+        mIsSyncSM = config.isSyncSM();
         mPrivateAddressCoordinator = addressCoordinator;
         mDeps = deps;
         mTetheringMetrics = tetheringMetrics;
@@ -514,7 +516,12 @@ public class IpServer extends StateMachineShim {
 
         private void handleError() {
             mLastError = TETHER_ERROR_DHCPSERVER_ERROR;
-            transitionTo(mInitialState);
+            if (mIsSyncSM) {
+                sendMessage(CMD_SERVICE_FAILED_TO_START, TETHER_ERROR_DHCPSERVER_ERROR);
+            } else {
+                sendMessageAtFrontOfQueueToAsyncSM(CMD_SERVICE_FAILED_TO_START,
+                        TETHER_ERROR_DHCPSERVER_ERROR);
+            }
         }
     }
 
@@ -832,7 +839,7 @@ public class IpServer extends StateMachineShim {
 
     private void addInterfaceToNetwork(final int netId, @NonNull final String ifaceName) {
         try {
-            if (null != mRoutingCoordinator.value) {
+            if (SdkLevel.isAtLeastS() && null != mRoutingCoordinator.value) {
                 // TODO : remove this call in favor of using the LocalNetworkConfiguration
                 // correctly, which will let ConnectivityService do it automatically.
                 mRoutingCoordinator.value.addInterfaceToNetwork(netId, ifaceName);
@@ -841,7 +848,38 @@ public class IpServer extends StateMachineShim {
             }
         } catch (ServiceSpecificException | RemoteException e) {
             mLog.e("Failed to add " + mIfaceName + " to local table: ", e);
-            return;
+        }
+    }
+
+    private void addInterfaceForward(@NonNull final String fromIface,
+            @NonNull final String toIface) throws ServiceSpecificException, RemoteException {
+        if (SdkLevel.isAtLeastS() && null != mRoutingCoordinator.value) {
+            mRoutingCoordinator.value.addInterfaceForward(fromIface, toIface);
+        } else {
+            mNetd.tetherAddForward(fromIface, toIface);
+            mNetd.ipfwdAddInterfaceForward(fromIface, toIface);
+        }
+    }
+
+    private void removeInterfaceForward(@NonNull final String fromIface,
+            @NonNull final String toIface) {
+        if (SdkLevel.isAtLeastS() && null != mRoutingCoordinator.value) {
+            try {
+                mRoutingCoordinator.value.removeInterfaceForward(fromIface, toIface);
+            } catch (ServiceSpecificException e) {
+                mLog.e("Exception in removeInterfaceForward", e);
+            }
+        } else {
+            try {
+                mNetd.ipfwdRemoveInterfaceForward(fromIface, toIface);
+            } catch (RemoteException | ServiceSpecificException e) {
+                mLog.e("Exception in ipfwdRemoveInterfaceForward", e);
+            }
+            try {
+                mNetd.tetherRemoveForward(fromIface, toIface);
+            } catch (RemoteException | ServiceSpecificException e) {
+                mLog.e("Exception in disableNat", e);
+            }
         }
     }
 
@@ -1125,7 +1163,19 @@ public class IpServer extends StateMachineShim {
             startServingInterface();
 
             if (mLastError != TETHER_ERROR_NO_ERROR) {
-                transitionTo(mInitialState);
+                // This will transition to InitialState right away, regardless of whether any
+                // message is already waiting in the StateMachine queue (including maybe some
+                // message to go to InitialState). InitialState will then process any pending
+                // message (and generally ignores them). It is difficult to know for sure whether
+                // this is correct in all cases, but this is equivalent to what IpServer was doing
+                // in previous versions of the mainline module.
+                // TODO : remove sendMessageAtFrontOfQueueToAsyncSM after migrating to the Sync
+                // StateMachine.
+                if (mIsSyncSM) {
+                    sendSelfMessageToSyncSM(CMD_SERVICE_FAILED_TO_START, mLastError);
+                } else {
+                    sendMessageAtFrontOfQueueToAsyncSM(CMD_SERVICE_FAILED_TO_START, mLastError);
+                }
             }
 
             if (DBG) Log.d(TAG, getStateString(mDesiredInterfaceState) + " serve " + mIfaceName);
@@ -1215,6 +1265,9 @@ public class IpServer extends StateMachineShim {
                     mCallback.requestEnableTethering(mInterfaceType, false /* enabled */);
                     transitionTo(mWaitingForRestartState);
                     break;
+                case CMD_SERVICE_FAILED_TO_START:
+                    mLog.e("start serving fail, error: " + message.arg1);
+                    transitionTo(mInitialState);
                 default:
                     return false;
             }
@@ -1354,16 +1407,7 @@ public class IpServer extends StateMachineShim {
             // to remove their rules, which generates errors.
             // Just do the best we can.
             mBpfCoordinator.maybeDetachProgram(mIfaceName, upstreamIface);
-            try {
-                mNetd.ipfwdRemoveInterfaceForward(mIfaceName, upstreamIface);
-            } catch (RemoteException | ServiceSpecificException e) {
-                mLog.e("Exception in ipfwdRemoveInterfaceForward: " + e.toString());
-            }
-            try {
-                mNetd.tetherRemoveForward(mIfaceName, upstreamIface);
-            } catch (RemoteException | ServiceSpecificException e) {
-                mLog.e("Exception in disableNat: " + e.toString());
-            }
+            removeInterfaceForward(mIfaceName, upstreamIface);
         }
 
         @Override
@@ -1419,10 +1463,9 @@ public class IpServer extends StateMachineShim {
 
                         mBpfCoordinator.maybeAttachProgram(mIfaceName, ifname);
                         try {
-                            mNetd.tetherAddForward(mIfaceName, ifname);
-                            mNetd.ipfwdAddInterfaceForward(mIfaceName, ifname);
+                            addInterfaceForward(mIfaceName, ifname);
                         } catch (RemoteException | ServiceSpecificException e) {
-                            mLog.e("Exception enabling NAT: " + e.toString());
+                            mLog.e("Exception enabling iface forward", e);
                             cleanupUpstream();
                             mLastError = TETHER_ERROR_ENABLE_FORWARDING_ERROR;
                             transitionTo(mInitialState);
