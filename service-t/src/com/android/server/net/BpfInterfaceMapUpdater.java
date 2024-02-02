@@ -15,6 +15,7 @@
  */
 package com.android.server.net;
 
+import android.os.Build;
 import android.content.Context;
 import android.net.INetd;
 import android.os.Handler;
@@ -24,6 +25,8 @@ import android.os.ServiceSpecificException;
 import android.system.ErrnoException;
 import android.util.IndentingPrintWriter;
 import android.util.Log;
+
+import androidx.annotation.RequiresApi;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.net.module.util.BaseNetdUnsolicitedEventListener;
@@ -36,6 +39,7 @@ import com.android.net.module.util.Struct.S32;
 /**
  * Monitor interface added (without removed) and right interface name and its index to bpf map.
  */
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
 public class BpfInterfaceMapUpdater {
     private static final String TAG = BpfInterfaceMapUpdater.class.getSimpleName();
     // This is current path but may be changed soon.
@@ -66,7 +70,7 @@ public class BpfInterfaceMapUpdater {
         /** Create BpfMap for updating interface and index mapping. */
         public IBpfMap<S32, InterfaceMapValue> getInterfaceMap() {
             try {
-                return new BpfMap<>(IFACE_INDEX_NAME_MAP_PATH, BpfMap.BPF_F_RDWR,
+                return new BpfMap<>(IFACE_INDEX_NAME_MAP_PATH,
                     S32.class, InterfaceMapValue.class);
             } catch (ErrnoException e) {
                 Log.e(TAG, "Cannot create interface map: " + e);
