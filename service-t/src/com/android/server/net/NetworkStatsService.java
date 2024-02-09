@@ -476,7 +476,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
     private final LocationPermissionChecker mLocationPermissionChecker;
 
     @NonNull
-    private final BpfInterfaceMapUpdater mInterfaceMapUpdater;
+    private final BpfInterfaceMapHelper mInterfaceMapHelper;
 
     @Nullable
     private final SkDestroyListener mSkDestroyListener;
@@ -628,8 +628,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         mContentObserver = mDeps.makeContentObserver(mHandler, mSettings,
                 mNetworkStatsSubscriptionsMonitor);
         mLocationPermissionChecker = mDeps.makeLocationPermissionChecker(mContext);
-        mInterfaceMapUpdater = mDeps.makeBpfInterfaceMapUpdater(mContext, mHandler);
-        mInterfaceMapUpdater.start();
+        mInterfaceMapHelper = mDeps.makeBpfInterfaceMapHelper();
         mUidCounterSetMap = mDeps.getUidCounterSetMap();
         mCookieTagMap = mDeps.getCookieTagMap();
         mStatsMapA = mDeps.getStatsMapA();
@@ -798,11 +797,10 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
             return new LocationPermissionChecker(context);
         }
 
-        /** Create BpfInterfaceMapUpdater to update bpf interface map. */
+        /** Create BpfInterfaceMapHelper to update bpf interface map. */
         @NonNull
-        public BpfInterfaceMapUpdater makeBpfInterfaceMapUpdater(
-                @NonNull Context ctx, @NonNull Handler handler) {
-            return new BpfInterfaceMapUpdater(ctx, handler);
+        public BpfInterfaceMapHelper makeBpfInterfaceMapHelper() {
+            return new BpfInterfaceMapHelper();
         }
 
         /** Get counter sets map for each UID. */
@@ -1432,7 +1430,11 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
     }
 
     @Override
-    public INetworkStatsSession openSessionForUsageStats(int flags, String callingPackage) {
+    public INetworkStatsSession openSessionForUsageStats(
+            int flags, @NonNull String callingPackage) {
+        Objects.requireNonNull(callingPackage);
+        PermissionUtils.enforcePackageNameMatchesUid(
+                mContext, Binder.getCallingUid(), callingPackage);
         return openSessionInternal(flags, callingPackage);
     }
 
@@ -1463,7 +1465,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
     private int restrictFlagsForCaller(int flags, @Nullable String callingPackage) {
         // All non-privileged callers are not allowed to turn off POLL_ON_OPEN.
-        final boolean isPrivileged = PermissionUtils.checkAnyPermissionOf(mContext,
+        final boolean isPrivileged = PermissionUtils.hasAnyPermissionOf(mContext,
                 NetworkStack.PERMISSION_MAINLINE_NETWORK_STACK,
                 android.Manifest.permission.NETWORK_STACK);
         if (!isPrivileged) {
@@ -1947,6 +1949,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
         final int callingPid = Binder.getCallingPid();
         final int callingUid = Binder.getCallingUid();
+        PermissionUtils.enforcePackageNameMatchesUid(mContext, callingUid, callingPackage);
         @NetworkStatsAccess.Level int accessLevel = checkAccessLevel(callingPackage);
         DataUsageRequest normalizedRequest;
         final long token = Binder.clearCallingIdentity();
@@ -2669,7 +2672,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
     @Override
     protected void dump(FileDescriptor fd, PrintWriter rawWriter, String[] args) {
-        if (!PermissionUtils.checkDumpPermission(mContext, TAG, rawWriter)) return;
+        if (!PermissionUtils.hasDumpPermission(mContext, TAG, rawWriter)) return;
 
         long duration = DateUtils.DAY_IN_MILLIS;
         final HashSet<String> argSet = new HashSet<String>();
@@ -2889,9 +2892,9 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
             }
 
             pw.println();
-            pw.println("InterfaceMapUpdater:");
+            pw.println("InterfaceMapHelper:");
             pw.increaseIndent();
-            mInterfaceMapUpdater.dump(pw);
+            mInterfaceMapHelper.dump(pw);
             pw.decreaseIndent();
 
             pw.println();
@@ -3038,7 +3041,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         BpfDump.dumpMap(statsMap, pw, mapName,
                 "ifaceIndex ifaceName tag_hex uid_int cnt_set rxBytes rxPackets txBytes txPackets",
                 (key, value) -> {
-                    final String ifName = mInterfaceMapUpdater.getIfNameByIndex(key.ifaceIndex);
+                    final String ifName = mInterfaceMapHelper.getIfNameByIndex(key.ifaceIndex);
                     return key.ifaceIndex + " "
                             + (ifName != null ? ifName : "unknown") + " "
                             + "0x" + Long.toHexString(key.tag) + " "
@@ -3056,7 +3059,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         BpfDump.dumpMap(mIfaceStatsMap, pw, "mIfaceStatsMap",
                 "ifaceIndex ifaceName rxBytes rxPackets txBytes txPackets",
                 (key, value) -> {
-                    final String ifName = mInterfaceMapUpdater.getIfNameByIndex(key.val);
+                    final String ifName = mInterfaceMapHelper.getIfNameByIndex(key.val);
                     return key.val + " "
                             + (ifName != null ? ifName : "unknown") + " "
                             + value.rxBytes + " "
