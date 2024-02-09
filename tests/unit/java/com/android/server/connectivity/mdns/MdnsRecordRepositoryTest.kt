@@ -22,6 +22,11 @@ import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.HandlerThread
 import com.android.server.connectivity.mdns.MdnsAnnouncer.AnnouncementInfo
+import com.android.server.connectivity.mdns.MdnsRecord.TYPE_A
+import com.android.server.connectivity.mdns.MdnsRecord.TYPE_AAAA
+import com.android.server.connectivity.mdns.MdnsRecord.TYPE_PTR
+import com.android.server.connectivity.mdns.MdnsRecord.TYPE_SRV
+import com.android.server.connectivity.mdns.MdnsRecord.TYPE_TXT
 import com.android.server.connectivity.mdns.MdnsRecordRepository.Dependencies
 import com.android.server.connectivity.mdns.MdnsRecordRepository.getReverseDnsAddress
 import com.android.server.connectivity.mdns.MdnsServiceInfo.TextEntry
@@ -36,7 +41,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -48,6 +55,13 @@ private const val TEST_SERVICE_ID_3 = 44
 private const val TEST_PORT = 12345
 private const val TEST_SUBTYPE = "_subtype"
 private const val TEST_SUBTYPE2 = "_subtype2"
+// RFC6762 10. Resource Record TTL Values and Cache Coherency
+// The recommended TTL value for Multicast DNS resource records with a host name as the resource
+// record's name (e.g., A, AAAA, HINFO) or a host name contained within the resource record's rdata
+// (e.g., SRV, reverse mapping PTR record) SHOULD be 120 seconds. The recommended TTL value for
+// other Multicast DNS resource records is 75 minutes.
+private const val LONG_TTL = 4_500_000L
+private const val SHORT_TTL = 120_000L
 private val TEST_HOSTNAME = arrayOf("Android_000102030405060708090A0B0C0D0E0F", "local")
 private val TEST_ADDRESSES = listOf(
         LinkAddress(parseNumericAddress("192.0.2.111"), 24),
@@ -80,7 +94,6 @@ class MdnsRecordRepositoryTest {
         override fun getInterfaceInetAddresses(iface: NetworkInterface) =
                 Collections.enumeration(TEST_ADDRESSES.map { it.address })
     }
-    private val flags = MdnsFeatureFlags.newBuilder().build()
 
     @Before
     fun setUp() {
@@ -93,9 +106,19 @@ class MdnsRecordRepositoryTest {
         thread.join()
     }
 
+    private fun makeFlags(
+        includeInetAddressesInProbing: Boolean = false,
+        isKnownAnswerSuppressionEnabled: Boolean = false,
+        unicastReplyEnabled: Boolean = true
+    ) = MdnsFeatureFlags.Builder()
+        .setIncludeInetAddressRecordsInProbing(includeInetAddressesInProbing)
+        .setIsKnownAnswerSuppressionEnabled(isKnownAnswerSuppressionEnabled)
+        .setIsUnicastReplyEnabled(unicastReplyEnabled)
+        .build()
+
     @Test
     fun testAddServiceAndProbe() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         assertEquals(0, repository.servicesCount)
         assertEquals(-1, repository.addService(TEST_SERVICE_ID_1, TEST_SERVICE_1))
         assertEquals(1, repository.servicesCount)
@@ -120,7 +143,7 @@ class MdnsRecordRepositoryTest {
         assertEquals(MdnsServiceRecord(expectedName,
                 0L /* receiptTimeMillis */,
                 false /* cacheFlush */,
-                120_000L /* ttlMillis */,
+                SHORT_TTL /* ttlMillis */,
                 0 /* servicePriority */, 0 /* serviceWeight */,
                 TEST_PORT, TEST_HOSTNAME), packet.authorityRecords[0])
 
@@ -129,7 +152,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testAddAndConflicts() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         assertFailsWith(NameConflictException::class) {
             repository.addService(TEST_SERVICE_ID_2, TEST_SERVICE_1)
@@ -141,7 +164,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testAddAndUpdates() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
 
         assertFailsWith(IllegalArgumentException::class) {
@@ -175,7 +198,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testInvalidReuseOfServiceId() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.addService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         assertFailsWith(IllegalArgumentException::class) {
             repository.addService(TEST_SERVICE_ID_1, TEST_SERVICE_2)
@@ -184,7 +207,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testHasActiveService() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         assertFalse(repository.hasActiveService(TEST_SERVICE_ID_1))
 
         repository.addService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
@@ -201,7 +224,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testExitAnnouncements() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         repository.onAdvertisementSent(TEST_SERVICE_ID_1, 2 /* sentPacketCount */)
 
@@ -231,7 +254,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testExitAnnouncements_WithSubtypes() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1,
                 setOf(TEST_SUBTYPE, TEST_SUBTYPE2))
         repository.onAdvertisementSent(TEST_SERVICE_ID_1, 2 /* sentPacketCount */)
@@ -273,7 +296,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testExitingServiceReAdded() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         repository.onAdvertisementSent(TEST_SERVICE_ID_1, 2 /* sentPacketCount */)
         repository.exitService(TEST_SERVICE_ID_1)
@@ -288,7 +311,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testOnProbingSucceeded() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         val announcementInfo = repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1,
                 setOf(TEST_SUBTYPE, TEST_SUBTYPE2))
         repository.onAdvertisementSent(TEST_SERVICE_ID_1, 2 /* sentPacketCount */)
@@ -390,37 +413,37 @@ class MdnsRecordRepositoryTest {
                         true /* cacheFlush */,
                         120000L /* ttlMillis */,
                         v4AddrRev,
-                        intArrayOf(MdnsRecord.TYPE_PTR)),
+                        intArrayOf(TYPE_PTR)),
                 MdnsNsecRecord(TEST_HOSTNAME,
                         0L /* receiptTimeMillis */,
                         true /* cacheFlush */,
                         120000L /* ttlMillis */,
                         TEST_HOSTNAME,
-                        intArrayOf(MdnsRecord.TYPE_A, MdnsRecord.TYPE_AAAA)),
+                        intArrayOf(TYPE_A, TYPE_AAAA)),
                 MdnsNsecRecord(v6Addr1Rev,
                         0L /* receiptTimeMillis */,
                         true /* cacheFlush */,
                         120000L /* ttlMillis */,
                         v6Addr1Rev,
-                        intArrayOf(MdnsRecord.TYPE_PTR)),
+                        intArrayOf(TYPE_PTR)),
                 MdnsNsecRecord(v6Addr2Rev,
                         0L /* receiptTimeMillis */,
                         true /* cacheFlush */,
                         120000L /* ttlMillis */,
                         v6Addr2Rev,
-                        intArrayOf(MdnsRecord.TYPE_PTR)),
+                        intArrayOf(TYPE_PTR)),
                 MdnsNsecRecord(serviceName,
                         0L /* receiptTimeMillis */,
                         true /* cacheFlush */,
                         4500000L /* ttlMillis */,
                         serviceName,
-                        intArrayOf(MdnsRecord.TYPE_TXT, MdnsRecord.TYPE_SRV))
+                        intArrayOf(TYPE_TXT, TYPE_SRV))
         ), packet.additionalRecords)
     }
 
     @Test
     fun testGetOffloadPacket() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
         val serviceType = arrayOf("_testservice", "_tcp", "local")
@@ -482,7 +505,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testGetReplyCaseInsensitive() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         val questionsCaseInSensitive = listOf(
                 MdnsPointerRecord(arrayOf("_TESTSERVICE", "_TCP", "local"), false /* isUnicast */))
@@ -496,102 +519,281 @@ class MdnsRecordRepositoryTest {
         assertEquals(7, replyCaseInsensitive.additionalAnswers.size)
     }
 
-    @Test
-    fun testGetReply() {
-        doGetReplyTest(queryWithSubtype = false)
+    /**
+     * Creates mDNS query packet with given query names and types.
+     */
+    private fun makeQuery(vararg queries: Pair<Int, Array<String>>): MdnsPacket {
+        val questions = queries.map { (type, name) -> makeQuestionRecord(name, type) }
+        return MdnsPacket(0 /* flags */, questions, listOf() /* answers */,
+            listOf() /* authorityRecords */, listOf() /* additionalRecords */)
+    }
+
+    private fun makeQuestionRecord(name: Array<String>, type: Int): MdnsRecord {
+        when (type) {
+            TYPE_PTR -> return MdnsPointerRecord(name, false /* isUnicast */)
+            TYPE_SRV -> return MdnsServiceRecord(name, false /* isUnicast */)
+            TYPE_TXT -> return MdnsTextRecord(name, false /* isUnicast */)
+            TYPE_A, TYPE_AAAA -> return MdnsInetAddressRecord(name, type, false /* isUnicast */)
+            else -> fail("Unexpected question type: $type")
+        }
     }
 
     @Test
-    fun testGetReply_WithSubtype() {
-        doGetReplyTest(queryWithSubtype = true)
-    }
-
-    private fun doGetReplyTest(queryWithSubtype: Boolean) {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
-        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1,
-                setOf(TEST_SUBTYPE, TEST_SUBTYPE2))
-        val queriedName = if (!queryWithSubtype) arrayOf("_testservice", "_tcp", "local")
-                else arrayOf(TEST_SUBTYPE, "_sub", "_testservice", "_tcp", "local")
-
-        val questions = listOf(MdnsPointerRecord(queriedName, false /* isUnicast */))
-        val query = MdnsPacket(0 /* flags */, questions, listOf() /* answers */,
-                listOf() /* authorityRecords */, listOf() /* additionalRecords */)
+    fun testGetReply_singlePtrQuestion_returnsSrvTxtAddressNsecRecords() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE))
         val src = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+
+        val query = makeQuery(TYPE_PTR to arrayOf("_testservice", "_tcp", "local"))
         val reply = repository.getReply(query, src)
 
         assertNotNull(reply)
-        // Source address is IPv4
-        assertEquals(MdnsConstants.getMdnsIPv4Address(), reply.destination.address)
-        assertEquals(MdnsConstants.MDNS_PORT, reply.destination.port)
-
-        // TTLs as per RFC6762 10.
-        val longTtl = 4_500_000L
-        val shortTtl = 120_000L
-        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
-
         assertEquals(listOf(
                 MdnsPointerRecord(
-                        queriedName,
-                        0L /* receiptTimeMillis */,
-                        false /* cacheFlush */,
-                        longTtl,
-                        serviceName),
-        ), reply.answers)
-
+                    arrayOf("_testservice", "_tcp", "local"), 0L, false, LONG_TTL, serviceName)),
+            reply.answers)
         assertEquals(listOf(
-            MdnsTextRecord(
-                    serviceName,
-                    0L /* receiptTimeMillis */,
-                    true /* cacheFlush */,
-                    longTtl,
-                    listOf() /* entries */),
-            MdnsServiceRecord(
-                    serviceName,
-                    0L /* receiptTimeMillis */,
-                    true /* cacheFlush */,
-                    shortTtl,
-                    0 /* servicePriority */,
-                    0 /* serviceWeight */,
-                    TEST_PORT,
-                    TEST_HOSTNAME),
-            MdnsInetAddressRecord(
-                    TEST_HOSTNAME,
-                    0L /* receiptTimeMillis */,
-                    true /* cacheFlush */,
-                    shortTtl,
-                    TEST_ADDRESSES[0].address),
-            MdnsInetAddressRecord(
-                    TEST_HOSTNAME,
-                    0L /* receiptTimeMillis */,
-                    true /* cacheFlush */,
-                    shortTtl,
-                    TEST_ADDRESSES[1].address),
-            MdnsInetAddressRecord(
-                    TEST_HOSTNAME,
-                    0L /* receiptTimeMillis */,
-                    true /* cacheFlush */,
-                    shortTtl,
-                    TEST_ADDRESSES[2].address),
-            MdnsNsecRecord(
-                    serviceName,
-                    0L /* receiptTimeMillis */,
-                    true /* cacheFlush */,
-                    longTtl,
-                    serviceName /* nextDomain */,
-                    intArrayOf(MdnsRecord.TYPE_TXT, MdnsRecord.TYPE_SRV)),
-            MdnsNsecRecord(
-                    TEST_HOSTNAME,
-                    0L /* receiptTimeMillis */,
-                    true /* cacheFlush */,
-                    shortTtl,
-                    TEST_HOSTNAME /* nextDomain */,
-                    intArrayOf(MdnsRecord.TYPE_A, MdnsRecord.TYPE_AAAA)),
-        ), reply.additionalAnswers)
+                MdnsTextRecord(serviceName, 0L, true, LONG_TTL, listOf()),
+                MdnsServiceRecord(serviceName, 0L, true, SHORT_TTL, 0, 0, TEST_PORT, TEST_HOSTNAME),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[0].address),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[1].address),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[2].address),
+                MdnsNsecRecord(serviceName, 0L, true, LONG_TTL, serviceName /* nextDomain */,
+                        intArrayOf(TYPE_TXT, TYPE_SRV)),
+                MdnsNsecRecord(TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_HOSTNAME /* nextDomain */,
+                        intArrayOf(TYPE_A, TYPE_AAAA)),
+            ), reply.additionalAnswers)
+    }
+
+    @Test
+    fun testGetReply_singleSubtypePtrQuestion_returnsSrvTxtAddressNsecRecords() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE))
+        val src = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+
+        val query = makeQuery(
+                TYPE_PTR to arrayOf(TEST_SUBTYPE, "_sub", "_testservice", "_tcp", "local"))
+        val reply = repository.getReply(query, src)
+
+        assertNotNull(reply)
+        assertEquals(listOf(
+                MdnsPointerRecord(
+                    arrayOf(TEST_SUBTYPE, "_sub", "_testservice", "_tcp", "local"), 0L, false,
+                    LONG_TTL, serviceName)),
+            reply.answers)
+        assertEquals(listOf(
+                MdnsTextRecord(serviceName, 0L, true, LONG_TTL, listOf()),
+                MdnsServiceRecord(serviceName, 0L, true, SHORT_TTL, 0, 0, TEST_PORT, TEST_HOSTNAME),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[0].address),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[1].address),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[2].address),
+                MdnsNsecRecord(serviceName, 0L, true, LONG_TTL, serviceName /* nextDomain */,
+                        intArrayOf(TYPE_TXT, TYPE_SRV)),
+                MdnsNsecRecord(TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_HOSTNAME /* nextDomain */,
+                        intArrayOf(TYPE_A, TYPE_AAAA)),
+            ), reply.additionalAnswers)
+    }
+
+    @Test
+    fun testGetReply_duplicatePtrQuestions_doesNotReturnDuplicateRecords() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE))
+        val src = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+
+        val query = makeQuery(
+                TYPE_PTR to arrayOf("_testservice", "_tcp", "local"),
+                TYPE_PTR to arrayOf("_testservice", "_tcp", "local"))
+        val reply = repository.getReply(query, src)
+
+        assertNotNull(reply)
+        assertEquals(listOf(
+                MdnsPointerRecord(
+                    arrayOf("_testservice", "_tcp", "local"), 0L, false, LONG_TTL, serviceName)),
+            reply.answers)
+        assertEquals(listOf(
+                MdnsTextRecord(serviceName, 0L, true, LONG_TTL, listOf()),
+                MdnsServiceRecord(serviceName, 0L, true, SHORT_TTL, 0, 0, TEST_PORT, TEST_HOSTNAME),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[0].address),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[1].address),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[2].address),
+                MdnsNsecRecord(serviceName, 0L, true, LONG_TTL, serviceName /* nextDomain */,
+                        intArrayOf(TYPE_TXT, TYPE_SRV)),
+                MdnsNsecRecord(TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_HOSTNAME /* nextDomain */,
+                        intArrayOf(TYPE_A, TYPE_AAAA)),
+            ), reply.additionalAnswers)
+    }
+
+    @Test
+    fun testGetReply_multiplePtrQuestionsWithSubtype_doesNotReturnDuplicateRecords() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE))
+        val src = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+
+        val query = makeQuery(
+                TYPE_PTR to arrayOf("_testservice", "_tcp", "local"),
+                TYPE_PTR to arrayOf(TEST_SUBTYPE, "_sub", "_testservice", "_tcp", "local"))
+        val reply = repository.getReply(query, src)
+
+        assertNotNull(reply)
+        assertEquals(listOf(
+                MdnsPointerRecord(
+                    arrayOf("_testservice", "_tcp", "local"), 0L, false, LONG_TTL, serviceName),
+                MdnsPointerRecord(
+                    arrayOf(TEST_SUBTYPE, "_sub", "_testservice", "_tcp", "local"),
+                    0L, false, LONG_TTL, serviceName)),
+            reply.answers)
+        assertEquals(listOf(
+                MdnsTextRecord(serviceName, 0L, true, LONG_TTL, listOf()),
+                MdnsServiceRecord(serviceName, 0L, true, SHORT_TTL, 0, 0, TEST_PORT, TEST_HOSTNAME),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[0].address),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[1].address),
+                MdnsInetAddressRecord(
+                    TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[2].address),
+                MdnsNsecRecord(serviceName, 0L, true, LONG_TTL, serviceName /* nextDomain */,
+                        intArrayOf(TYPE_TXT, TYPE_SRV)),
+                MdnsNsecRecord(TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_HOSTNAME /* nextDomain */,
+                        intArrayOf(TYPE_A, TYPE_AAAA)),
+            ), reply.additionalAnswers)
+    }
+
+    @Test
+    fun testGetReply_txtQuestion_returnsNoNsecRecord() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE))
+        val src = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+
+        val query = makeQuery(TYPE_TXT to serviceName)
+        val reply = repository.getReply(query, src)
+
+        assertNotNull(reply)
+        assertEquals(listOf(MdnsTextRecord(serviceName, 0L, true, LONG_TTL, listOf())),
+                reply.answers)
+        // No NSEC records because the reply doesn't include the SRV record
+        assertTrue(reply.additionalAnswers.isEmpty())
+    }
+
+    @Test
+    fun testGetReply_AAAAQuestionButNoIpv6Address_returnsNsecRecord() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(
+                TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE),
+                listOf(LinkAddress(parseNumericAddress("192.0.2.111"), 24)))
+        val src = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+
+        val query = makeQuery(TYPE_AAAA to TEST_HOSTNAME)
+        val reply = repository.getReply(query, src)
+
+        assertNotNull(reply)
+        assertTrue(reply.answers.isEmpty())
+        assertEquals(listOf(
+                MdnsNsecRecord(TEST_HOSTNAME, 0L, true, LONG_TTL, TEST_HOSTNAME /* nextDomain */,
+                        intArrayOf(TYPE_AAAA))),
+            reply.additionalAnswers)
+    }
+
+    @Test
+    fun testGetReply_ptrAndSrvQuestions_doesNotReturnSrvRecordInAdditionalAnswerSection() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE))
+        val src = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+
+        val query = makeQuery(
+                TYPE_PTR to arrayOf("_testservice", "_tcp", "local"),
+                TYPE_SRV to serviceName)
+        val reply = repository.getReply(query, src)
+
+        assertNotNull(reply)
+        assertEquals(listOf(
+                MdnsPointerRecord(
+                    arrayOf("_testservice", "_tcp", "local"), 0L, false, LONG_TTL, serviceName),
+                MdnsServiceRecord(
+                    serviceName, 0L, true, SHORT_TTL, 0, 0, TEST_PORT, TEST_HOSTNAME)),
+            reply.answers)
+        assertFalse(reply.additionalAnswers.any { it -> it is MdnsServiceRecord })
+    }
+
+    @Test
+    fun testGetReply_srvTxtAddressQuestions_returnsAllRecordsInAnswerSectionExceptNsec() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE))
+        val src = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+
+        val query = makeQuery(
+                TYPE_SRV to serviceName,
+                TYPE_TXT to serviceName,
+                TYPE_SRV to serviceName,
+                TYPE_A to TEST_HOSTNAME,
+                TYPE_AAAA to TEST_HOSTNAME)
+        val reply = repository.getReply(query, src)
+
+        assertNotNull(reply)
+        assertEquals(listOf(
+                MdnsServiceRecord(serviceName, 0L, true, SHORT_TTL, 0, 0, TEST_PORT, TEST_HOSTNAME),
+                MdnsTextRecord(serviceName, 0L, true, LONG_TTL, listOf()),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[0].address),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[1].address),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_ADDRESSES[2].address)),
+            reply.answers)
+        assertEquals(listOf(
+                MdnsNsecRecord(serviceName, 0L, true, LONG_TTL, serviceName /* nextDomain */,
+                        intArrayOf(TYPE_TXT, TYPE_SRV)),
+                MdnsNsecRecord(TEST_HOSTNAME, 0L, true, SHORT_TTL, TEST_HOSTNAME /* nextDomain */,
+                        intArrayOf(TYPE_A, TYPE_AAAA))),
+            reply.additionalAnswers)
+    }
+
+    @Test
+    fun testGetReply_queryWithIpv4Address_replyWithIpv4Address() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE))
+        val query = makeQuery(TYPE_PTR to arrayOf("_testservice", "_tcp", "local"))
+
+        val srcIpv4 = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+        val replyIpv4 = repository.getReply(query, srcIpv4)
+
+        assertNotNull(replyIpv4)
+        assertEquals(MdnsConstants.getMdnsIPv4Address(), replyIpv4.destination.address)
+        assertEquals(MdnsConstants.MDNS_PORT, replyIpv4.destination.port)
+    }
+
+    @Test
+    fun testGetReply_queryWithIpv6Address_replyWithIpv6Address() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1, setOf(TEST_SUBTYPE))
+        val query = makeQuery(TYPE_PTR to arrayOf("_testservice", "_tcp", "local"))
+
+        val srcIpv6 = InetSocketAddress(parseNumericAddress("2001:db8::123"), 5353)
+        val replyIpv6 = repository.getReply(query, srcIpv6)
+
+        assertNotNull(replyIpv6)
+        assertEquals(MdnsConstants.getMdnsIPv6Address(), replyIpv6.destination.address)
+        assertEquals(MdnsConstants.MDNS_PORT, replyIpv6.destination.port)
     }
 
     @Test
     fun testGetConflictingServices() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.addService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         repository.addService(TEST_SERVICE_ID_2, TEST_SERVICE_2)
 
@@ -619,7 +821,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testGetConflictingServicesCaseInsensitive() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.addService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         repository.addService(TEST_SERVICE_ID_2, TEST_SERVICE_2)
 
@@ -647,7 +849,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testGetConflictingServices_IdenticalService() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.addService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         repository.addService(TEST_SERVICE_ID_2, TEST_SERVICE_2)
 
@@ -676,7 +878,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testGetConflictingServicesCaseInsensitive_IdenticalService() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.addService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         repository.addService(TEST_SERVICE_ID_2, TEST_SERVICE_2)
 
@@ -705,7 +907,7 @@ class MdnsRecordRepositoryTest {
 
     @Test
     fun testGetServiceRepliedRequestsCount() {
-        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, flags)
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
         repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
         // Verify that there is no packet replied.
         assertEquals(MdnsConstants.NO_PACKET,
@@ -730,7 +932,7 @@ class MdnsRecordRepositoryTest {
     @Test
     fun testIncludeInetAddressRecordsInProbing() {
         val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME,
-                MdnsFeatureFlags.newBuilder().setIncludeInetAddressRecordsInProbing(true).build())
+            makeFlags(includeInetAddressesInProbing = true))
         repository.updateAddresses(TEST_ADDRESSES)
         assertEquals(0, repository.servicesCount)
         assertEquals(-1, repository.addService(TEST_SERVICE_ID_1, TEST_SERVICE_1))
@@ -760,7 +962,7 @@ class MdnsRecordRepositoryTest {
                 expectedName,
                 0L /* receiptTimeMillis */,
                 false /* cacheFlush */,
-                120_000L /* ttlMillis */,
+                SHORT_TTL /* ttlMillis */,
                 0 /* servicePriority */,
                 0 /* serviceWeight */,
                 TEST_PORT,
@@ -769,23 +971,368 @@ class MdnsRecordRepositoryTest {
                 TEST_HOSTNAME,
                 0L /* receiptTimeMillis */,
                 false /* cacheFlush */,
-                120_000L /* ttlMillis */,
+                SHORT_TTL /* ttlMillis */,
                 TEST_ADDRESSES[0].address),
             MdnsInetAddressRecord(
                 TEST_HOSTNAME,
                 0L /* receiptTimeMillis */,
                 false /* cacheFlush */,
-                120_000L /* ttlMillis */,
+                SHORT_TTL /* ttlMillis */,
                 TEST_ADDRESSES[1].address),
             MdnsInetAddressRecord(
                 TEST_HOSTNAME,
                 0L /* receiptTimeMillis */,
                 false /* cacheFlush */,
-                120_000L /* ttlMillis */,
+                SHORT_TTL /* ttlMillis */,
                 TEST_ADDRESSES[2].address)
         ), packet.authorityRecords)
 
         assertContentEquals(intArrayOf(TEST_SERVICE_ID_1), repository.clearServices())
+    }
+
+    private fun doGetReplyWithAnswersTest(
+            questions: List<MdnsRecord>,
+            knownAnswers: List<MdnsRecord>,
+            replyAnswers: List<MdnsRecord>,
+            additionalAnswers: List<MdnsRecord>,
+            expectReply: Boolean
+    ) {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME,
+            makeFlags(isKnownAnswerSuppressionEnabled = true))
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
+        val query = MdnsPacket(0 /* flags */, questions, knownAnswers,
+                listOf() /* authorityRecords */, listOf() /* additionalRecords */)
+        val src = InetSocketAddress(parseNumericAddress("192.0.2.123"), 5353)
+        val reply = repository.getReply(query, src)
+
+        if (!expectReply) {
+            assertNull(reply)
+            return
+        }
+
+        assertNotNull(reply)
+        // Source address is IPv4
+        assertEquals(MdnsConstants.getMdnsIPv4Address(), reply.destination.address)
+        assertEquals(MdnsConstants.MDNS_PORT, reply.destination.port)
+        assertEquals(replyAnswers, reply.answers)
+        assertEquals(additionalAnswers, reply.additionalAnswers)
+    }
+
+    @Test
+    fun testGetReply_HasAnswers() {
+        val queriedName = arrayOf("_testservice", "_tcp", "local")
+        val questions = listOf(MdnsPointerRecord(queriedName, false /* isUnicast */))
+        val knownAnswers = listOf(MdnsPointerRecord(
+                arrayOf("_testservice", "_tcp", "local"),
+                0L /* receiptTimeMillis */,
+                false /* cacheFlush */,
+                LONG_TTL,
+                arrayOf("MyTestService", "_testservice", "_tcp", "local")))
+        doGetReplyWithAnswersTest(questions, knownAnswers, listOf() /* replyAnswers */,
+                listOf() /* additionalAnswers */, false /* expectReply */)
+    }
+
+    @Test
+    fun testGetReply_HasAnswers_TtlLessThanHalf() {
+        val queriedName = arrayOf("_testservice", "_tcp", "local")
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+        val questions = listOf(MdnsPointerRecord(queriedName, false /* isUnicast */))
+        val knownAnswers = listOf(MdnsPointerRecord(
+                arrayOf("_testservice", "_tcp", "local"),
+                0L /* receiptTimeMillis */,
+                false /* cacheFlush */,
+                (LONG_TTL / 2 - 1000L),
+                arrayOf("MyTestService", "_testservice", "_tcp", "local")))
+        val replyAnswers = listOf(MdnsPointerRecord(
+                queriedName,
+                0L /* receiptTimeMillis */,
+                false /* cacheFlush */,
+                LONG_TTL,
+                serviceName))
+        val additionalAnswers = listOf(
+                MdnsTextRecord(
+                        serviceName,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        LONG_TTL,
+                        listOf() /* entries */),
+                MdnsServiceRecord(
+                        serviceName,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        0 /* servicePriority */,
+                        0 /* serviceWeight */,
+                        TEST_PORT,
+                        TEST_HOSTNAME),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_ADDRESSES[0].address),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_ADDRESSES[1].address),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_ADDRESSES[2].address),
+                MdnsNsecRecord(
+                        serviceName,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        LONG_TTL,
+                        serviceName /* nextDomain */,
+                        intArrayOf(MdnsRecord.TYPE_TXT, MdnsRecord.TYPE_SRV)),
+                MdnsNsecRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_HOSTNAME /* nextDomain */,
+                        intArrayOf(MdnsRecord.TYPE_A, MdnsRecord.TYPE_AAAA)))
+        doGetReplyWithAnswersTest(questions, knownAnswers, replyAnswers, additionalAnswers,
+                true /* expectReply */)
+    }
+
+    @Test
+    fun testGetReply_HasAnotherAnswer() {
+        val queriedName = arrayOf("_testservice", "_tcp", "local")
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+        val questions = listOf(MdnsPointerRecord(queriedName, false /* isUnicast */))
+        val knownAnswers = listOf(MdnsPointerRecord(
+                queriedName,
+                0L /* receiptTimeMillis */,
+                false /* cacheFlush */,
+                LONG_TTL,
+                arrayOf("MyOtherTestService", "_testservice", "_tcp", "local")))
+        val replyAnswers = listOf(MdnsPointerRecord(
+                queriedName,
+                0L /* receiptTimeMillis */,
+                false /* cacheFlush */,
+                LONG_TTL,
+                serviceName))
+        val additionalAnswers = listOf(
+                MdnsTextRecord(
+                        serviceName,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        LONG_TTL,
+                        listOf() /* entries */),
+                MdnsServiceRecord(
+                        serviceName,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        0 /* servicePriority */,
+                        0 /* serviceWeight */,
+                        TEST_PORT,
+                        TEST_HOSTNAME),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_ADDRESSES[0].address),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_ADDRESSES[1].address),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_ADDRESSES[2].address),
+                MdnsNsecRecord(
+                        serviceName,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        LONG_TTL,
+                        serviceName /* nextDomain */,
+                        intArrayOf(MdnsRecord.TYPE_TXT, MdnsRecord.TYPE_SRV)),
+                MdnsNsecRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_HOSTNAME /* nextDomain */,
+                        intArrayOf(MdnsRecord.TYPE_A, MdnsRecord.TYPE_AAAA)))
+        doGetReplyWithAnswersTest(questions, knownAnswers, replyAnswers, additionalAnswers,
+                true /* expectReply */)
+    }
+
+    @Test
+    fun testGetReply_HasAnswers_MultiQuestions() {
+        val queriedName = arrayOf("_testservice", "_tcp", "local")
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+        val questions = listOf(
+                MdnsPointerRecord(queriedName, false /* isUnicast */),
+                MdnsServiceRecord(serviceName, false /* isUnicast */))
+        val knownAnswers = listOf(MdnsPointerRecord(
+                queriedName,
+                0L /* receiptTimeMillis */,
+                false /* cacheFlush */,
+                LONG_TTL - 1000L,
+                serviceName))
+        val replyAnswers = listOf(MdnsServiceRecord(
+                serviceName,
+                0L /* receiptTimeMillis */,
+                false /* cacheFlush */,
+                SHORT_TTL /* ttlMillis */,
+                0 /* servicePriority */,
+                0 /* serviceWeight */,
+                TEST_PORT,
+                TEST_HOSTNAME))
+        val additionalAnswers = listOf(
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_ADDRESSES[0].address),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_ADDRESSES[1].address),
+                MdnsInetAddressRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_ADDRESSES[2].address),
+                MdnsNsecRecord(
+                        TEST_HOSTNAME,
+                        0L /* receiptTimeMillis */,
+                        true /* cacheFlush */,
+                        SHORT_TTL,
+                        TEST_HOSTNAME /* nextDomain */,
+                        intArrayOf(MdnsRecord.TYPE_A, MdnsRecord.TYPE_AAAA)))
+        doGetReplyWithAnswersTest(questions, knownAnswers, replyAnswers, additionalAnswers,
+                true /* expectReply */)
+    }
+
+    @Test
+    fun testGetReply_HasAnswers_MultiQuestions_NoReply() {
+        val queriedName = arrayOf("_testservice", "_tcp", "local")
+        val serviceName = arrayOf("MyTestService", "_testservice", "_tcp", "local")
+        val questions = listOf(
+                MdnsPointerRecord(queriedName, false /* isUnicast */),
+                MdnsServiceRecord(serviceName, false /* isUnicast */))
+        val knownAnswers = listOf(
+            MdnsPointerRecord(
+                queriedName,
+                0L /* receiptTimeMillis */,
+                false /* cacheFlush */,
+                LONG_TTL - 1000L,
+                serviceName
+            ),
+            MdnsServiceRecord(
+                serviceName,
+                0L /* receiptTimeMillis */,
+                false /* cacheFlush */,
+                SHORT_TTL - 15_000L,
+                0 /* servicePriority */,
+                0 /* serviceWeight */,
+                TEST_PORT,
+                TEST_HOSTNAME
+            )
+        )
+        doGetReplyWithAnswersTest(
+            questions, knownAnswers, listOf() /* replyAnswers */,
+            listOf() /* additionalAnswers */, false /* expectReply */
+        )
+    }
+
+    @Test
+    fun testReplyUnicastToQueryUnicastQuestions() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
+
+        // Ask for 2 services, only the first one is known and requests unicast reply
+        val questions = listOf(
+            MdnsPointerRecord(arrayOf("_testservice", "_tcp", "local"), true /* isUnicast */),
+            MdnsPointerRecord(arrayOf("_otherservice", "_tcp", "local"), true /* isUnicast */))
+        val query = MdnsPacket(0 /* flags */, questions, listOf() /* answers */,
+            listOf() /* authorityRecords */, listOf() /* additionalRecords */)
+        val src = InetSocketAddress(parseNumericAddress("2001:db8::123"), 5353)
+
+        // Reply to the question and verify it is sent to the source.
+        val reply = repository.getReply(query, src)
+        assertNotNull(reply)
+        assertEquals(src, reply.destination)
+    }
+
+    @Test
+    fun testReplyMulticastToQueryUnicastAndMulticastMixedQuestions() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
+        repository.addServiceAndFinishProbing(TEST_SERVICE_ID_2, NsdServiceInfo().apply {
+            serviceType = "_otherservice._tcp"
+            serviceName = "OtherTestService"
+            port = TEST_PORT
+        })
+
+        // Ask for 2 services, both are known and only the first one requests unicast reply
+        val questions = listOf(
+            MdnsPointerRecord(arrayOf("_testservice", "_tcp", "local"), true /* isUnicast */),
+            MdnsPointerRecord(arrayOf("_otherservice", "_tcp", "local"), false /* isUnicast */))
+        val query = MdnsPacket(0 /* flags */, questions, listOf() /* answers */,
+            listOf() /* authorityRecords */, listOf() /* additionalRecords */)
+        val src = InetSocketAddress(parseNumericAddress("2001:db8::123"), 5353)
+
+        // Reply to the question and verify it is sent multicast.
+        val reply = repository.getReply(query, src)
+        assertNotNull(reply)
+        assertEquals(MdnsConstants.getMdnsIPv6Address(), reply.destination.address)
+    }
+
+    @Test
+    fun testReplyMulticastWhenNoUnicastQueryMatches() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME, makeFlags())
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
+
+        // Ask for 2 services, the first one requests a unicast reply but is unknown
+        val questions = listOf(
+            MdnsPointerRecord(arrayOf("_otherservice", "_tcp", "local"), true /* isUnicast */),
+            MdnsPointerRecord(arrayOf("_testservice", "_tcp", "local"), false /* isUnicast */))
+        val query = MdnsPacket(0 /* flags */, questions, listOf() /* answers */,
+            listOf() /* authorityRecords */, listOf() /* additionalRecords */)
+        val src = InetSocketAddress(parseNumericAddress("2001:db8::123"), 5353)
+
+        // Reply to the question and verify it is sent multicast.
+        val reply = repository.getReply(query, src)
+        assertNotNull(reply)
+        assertEquals(MdnsConstants.getMdnsIPv6Address(), reply.destination.address)
+    }
+
+    @Test
+    fun testReplyMulticastWhenUnicastFeatureDisabled() {
+        val repository = MdnsRecordRepository(thread.looper, deps, TEST_HOSTNAME,
+            makeFlags(unicastReplyEnabled = false))
+        repository.initWithService(TEST_SERVICE_ID_1, TEST_SERVICE_1)
+
+        // The service is known and requests unicast reply, but the feature is disabled
+        val questions = listOf(
+            MdnsPointerRecord(arrayOf("_testservice", "_tcp", "local"), true /* isUnicast */))
+        val query = MdnsPacket(0 /* flags */, questions, listOf() /* answers */,
+            listOf() /* authorityRecords */, listOf() /* additionalRecords */)
+        val src = InetSocketAddress(parseNumericAddress("2001:db8::123"), 5353)
+
+        // Reply to the question and verify it is sent multicast.
+        val reply = repository.getReply(query, src)
+        assertNotNull(reply)
+        assertEquals(MdnsConstants.getMdnsIPv6Address(), reply.destination.address)
     }
 }
 
@@ -793,9 +1340,17 @@ private fun MdnsRecordRepository.initWithService(
     serviceId: Int,
     serviceInfo: NsdServiceInfo,
     subtypes: Set<String> = setOf(),
+    addresses: List<LinkAddress> = TEST_ADDRESSES
 ): AnnouncementInfo {
-    updateAddresses(TEST_ADDRESSES)
+    updateAddresses(addresses)
     serviceInfo.setSubtypes(subtypes)
+    return addServiceAndFinishProbing(serviceId, serviceInfo)
+}
+
+private fun MdnsRecordRepository.addServiceAndFinishProbing(
+    serviceId: Int,
+    serviceInfo: NsdServiceInfo
+): AnnouncementInfo {
     addService(serviceId, serviceInfo)
     val probingInfo = setServiceProbing(serviceId)
     assertNotNull(probingInfo)

@@ -44,7 +44,6 @@ import static android.net.NetworkStats.STATS_PER_UID;
 import static android.net.NetworkStats.TAG_ALL;
 import static android.net.NetworkStats.TAG_NONE;
 import static android.net.NetworkStats.UID_ALL;
-import static android.net.NetworkStatsCollection.compareStats;
 import static android.net.NetworkStatsHistory.FIELD_ALL;
 import static android.net.NetworkTemplate.MATCH_MOBILE;
 import static android.net.NetworkTemplate.MATCH_TEST;
@@ -295,6 +294,11 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
     static final String CONFIG_ENABLE_NETWORK_STATS_EVENT_LOGGER =
             "enable_network_stats_event_logger";
 
+    static final String NETSTATS_FASTDATAINPUT_TARGET_ATTEMPTS =
+            "netstats_fastdatainput_target_attempts";
+    static final String NETSTATS_FASTDATAINPUT_SUCCESSES_COUNTER_NAME = "fastdatainput.successes";
+    static final String NETSTATS_FASTDATAINPUT_FALLBACKS_COUNTER_NAME = "fastdatainput.fallbacks";
+
     private final Context mContext;
     private final NetworkStatsFactory mStatsFactory;
     private final AlarmManager mAlarmManager;
@@ -318,6 +322,8 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
     private PersistentInt mImportLegacyAttemptsCounter = null;
     private PersistentInt mImportLegacySuccessesCounter = null;
     private PersistentInt mImportLegacyFallbacksCounter = null;
+    private PersistentInt mFastDataInputSuccessesCounter = null;
+    private PersistentInt mFastDataInputFallbacksCounter = null;
 
     @VisibleForTesting
     public static final String ACTION_NETWORK_STATS_POLL =
@@ -486,9 +492,10 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
      */
     private static class OpenSessionKey {
         public final int uid;
+        @Nullable
         public final String packageName;
 
-        OpenSessionKey(int uid, @NonNull String packageName) {
+        OpenSessionKey(int uid, @Nullable String packageName) {
             this.uid = uid;
             this.packageName = packageName;
         }
@@ -695,6 +702,24 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         }
 
         /**
+         * Get the count of using FastDataInput target attempts.
+         */
+        public int getUseFastDataInputTargetAttempts() {
+            return DeviceConfigUtils.getDeviceConfigPropertyInt(
+                    DeviceConfig.NAMESPACE_TETHERING,
+                    NETSTATS_FASTDATAINPUT_TARGET_ATTEMPTS, 0);
+        }
+
+        /**
+         * Compare two {@link NetworkStatsCollection} instances and returning a human-readable
+         * string description of difference for debugging purpose.
+         */
+        public String compareStats(@NonNull NetworkStatsCollection a,
+                                   @NonNull NetworkStatsCollection b, boolean allowKeyChange) {
+            return NetworkStatsCollection.compareStats(a, b, allowKeyChange);
+        }
+
+        /**
          * Create a persistent counter for given directory and name.
          */
         public PersistentInt createPersistentCounter(@NonNull Path dir, @NonNull String name)
@@ -892,13 +917,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         synchronized (mStatsLock) {
             mSystemReady = true;
 
-            // create data recorders along with historical rotators
-            mXtRecorder = buildRecorder(PREFIX_XT, mSettings.getXtConfig(), false, mStatsDir,
-                    true /* wipeOnError */);
-            mUidRecorder = buildRecorder(PREFIX_UID, mSettings.getUidConfig(), false, mStatsDir,
-                    true /* wipeOnError */);
-            mUidTagRecorder = buildRecorder(PREFIX_UID_TAG, mSettings.getUidTagConfig(), true,
-                    mStatsDir, true /* wipeOnError */);
+            makeRecordersLocked();
 
             updatePersistThresholdsLocked();
 
@@ -963,13 +982,106 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
     private NetworkStatsRecorder buildRecorder(
             String prefix, NetworkStatsSettings.Config config, boolean includeTags,
-            File baseDir, boolean wipeOnError) {
+            File baseDir, boolean wipeOnError, boolean useFastDataInput) {
         final DropBoxManager dropBox = (DropBoxManager) mContext.getSystemService(
                 Context.DROPBOX_SERVICE);
         return new NetworkStatsRecorder(new FileRotator(
                 baseDir, prefix, config.rotateAgeMillis, config.deleteAgeMillis),
                 mNonMonotonicObserver, dropBox, prefix, config.bucketDuration, includeTags,
-                wipeOnError);
+                wipeOnError, useFastDataInput, baseDir);
+    }
+
+    @GuardedBy("mStatsLock")
+    private void makeRecordersLocked() {
+        boolean useFastDataInput = true;
+        try {
+            mFastDataInputSuccessesCounter = mDeps.createPersistentCounter(mStatsDir.toPath(),
+                    NETSTATS_FASTDATAINPUT_SUCCESSES_COUNTER_NAME);
+            mFastDataInputFallbacksCounter = mDeps.createPersistentCounter(mStatsDir.toPath(),
+                    NETSTATS_FASTDATAINPUT_FALLBACKS_COUNTER_NAME);
+        } catch (IOException e) {
+            Log.wtf(TAG, "Failed to create persistent counters, skip.", e);
+            useFastDataInput = false;
+        }
+
+        final int targetAttempts = mDeps.getUseFastDataInputTargetAttempts();
+        int successes = 0;
+        int fallbacks = 0;
+        try {
+            successes = mFastDataInputSuccessesCounter.get();
+            // Fallbacks counter would be set to non-zero value to indicate the reading was
+            // not successful.
+            fallbacks = mFastDataInputFallbacksCounter.get();
+        } catch (IOException e) {
+            Log.wtf(TAG, "Failed to read counters, skip.", e);
+            useFastDataInput = false;
+        }
+
+        final boolean doComparison;
+        if (useFastDataInput) {
+            // Use FastDataInput if it needs to be evaluated or at least one success.
+            doComparison = targetAttempts > successes + fallbacks;
+            // Set target attempt to -1 as the kill switch to disable the feature.
+            useFastDataInput = targetAttempts >= 0 && (doComparison || successes > 0);
+        } else {
+            // useFastDataInput is false due to previous failures.
+            doComparison = false;
+        }
+
+        // create data recorders along with historical rotators.
+        // Don't wipe on error if comparison is needed.
+        mXtRecorder = buildRecorder(PREFIX_XT, mSettings.getXtConfig(), false, mStatsDir,
+                !doComparison /* wipeOnError */, useFastDataInput);
+        mUidRecorder = buildRecorder(PREFIX_UID, mSettings.getUidConfig(), false, mStatsDir,
+                !doComparison /* wipeOnError */, useFastDataInput);
+        mUidTagRecorder = buildRecorder(PREFIX_UID_TAG, mSettings.getUidTagConfig(), true,
+                mStatsDir, !doComparison /* wipeOnError */, useFastDataInput);
+
+        if (!doComparison) return;
+
+        final MigrationInfo[] migrations = new MigrationInfo[]{
+                new MigrationInfo(mXtRecorder),
+                new MigrationInfo(mUidRecorder),
+                new MigrationInfo(mUidTagRecorder)
+        };
+        // Set wipeOnError flag false so the recorder won't damage persistent data if reads
+        // failed and calling deleteAll.
+        final NetworkStatsRecorder[] legacyRecorders = new NetworkStatsRecorder[]{
+                buildRecorder(PREFIX_XT, mSettings.getXtConfig(), false, mStatsDir,
+                        false /* wipeOnError */, false /* useFastDataInput */),
+                buildRecorder(PREFIX_UID, mSettings.getUidConfig(), false, mStatsDir,
+                        false /* wipeOnError */, false /* useFastDataInput */),
+                buildRecorder(PREFIX_UID_TAG, mSettings.getUidTagConfig(), true, mStatsDir,
+                        false /* wipeOnError */, false /* useFastDataInput */)};
+        boolean success = true;
+        for (int i = 0; i < migrations.length; i++) {
+            try {
+                migrations[i].collection = migrations[i].recorder.getOrLoadCompleteLocked();
+            } catch (Throwable t) {
+                Log.wtf(TAG, "Failed to load collection, skip.", t);
+                success = false;
+                break;
+            }
+            if (!compareImportedToLegacyStats(migrations[i], legacyRecorders[i],
+                    false /* allowKeyChange */)) {
+                success = false;
+                break;
+            }
+        }
+
+        try {
+            if (success) {
+                mFastDataInputSuccessesCounter.set(successes + 1);
+            } else {
+                // Fallback.
+                mXtRecorder = legacyRecorders[0];
+                mUidRecorder = legacyRecorders[1];
+                mUidTagRecorder = legacyRecorders[2];
+                mFastDataInputFallbacksCounter.set(fallbacks + 1);
+            }
+        } catch (IOException e) {
+            Log.wtf(TAG, "Failed to update counters. success = " + success, e);
+        }
     }
 
     @GuardedBy("mStatsLock")
@@ -1068,7 +1180,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
                 new NetworkStatsSettings.Config(HOUR_IN_MILLIS,
                 15 * DAY_IN_MILLIS, 90 * DAY_IN_MILLIS);
         final NetworkStatsRecorder devRecorder = buildRecorder(PREFIX_DEV, devConfig,
-                false, mStatsDir, true /* wipeOnError */);
+                false, mStatsDir, true /* wipeOnError */, false /* useFastDataInput */);
         final MigrationInfo[] migrations = new MigrationInfo[]{
                 new MigrationInfo(devRecorder), new MigrationInfo(mXtRecorder),
                 new MigrationInfo(mUidRecorder), new MigrationInfo(mUidTagRecorder)
@@ -1085,11 +1197,11 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
             legacyRecorders = new NetworkStatsRecorder[]{
                 null /* dev Recorder */,
                 buildRecorder(PREFIX_XT, mSettings.getXtConfig(), false, legacyBaseDir,
-                        false /* wipeOnError */),
+                        false /* wipeOnError */, false /* useFastDataInput */),
                 buildRecorder(PREFIX_UID, mSettings.getUidConfig(), false, legacyBaseDir,
-                        false /* wipeOnError */),
+                        false /* wipeOnError */, false /* useFastDataInput */),
                 buildRecorder(PREFIX_UID_TAG, mSettings.getUidTagConfig(), true, legacyBaseDir,
-                        false /* wipeOnError */)};
+                        false /* wipeOnError */, false /* useFastDataInput */)};
         } else {
             legacyRecorders = null;
         }
@@ -1120,7 +1232,8 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
                 if (runComparison) {
                     final boolean success =
-                            compareImportedToLegacyStats(migration, legacyRecorders[i]);
+                            compareImportedToLegacyStats(migration, legacyRecorders[i],
+                                    true /* allowKeyChange */);
                     if (!success && !dryRunImportOnly) {
                         tryIncrementLegacyFallbacksCounter();
                     }
@@ -1243,7 +1356,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
      * does not match or throw with exceptions.
      */
     private boolean compareImportedToLegacyStats(@NonNull MigrationInfo migration,
-            @Nullable NetworkStatsRecorder legacyRecorder) {
+            @Nullable NetworkStatsRecorder legacyRecorder, boolean allowKeyChange) {
         final NetworkStatsCollection legacyStats;
         // Skip the recorder that doesn't need to be compared.
         if (legacyRecorder == null) return true;
@@ -1258,7 +1371,8 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
         // The result of comparison is only for logging.
         try {
-            final String error = compareStats(migration.collection, legacyStats);
+            final String error = mDeps.compareStats(migration.collection, legacyStats,
+                    allowKeyChange);
             if (error != null) {
                 Log.wtf(TAG, "Unexpected comparison result for recorder "
                         + legacyRecorder.getCookie() + ": " + error);
@@ -1348,7 +1462,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         return now - lastCallTime < POLL_RATE_LIMIT_MS;
     }
 
-    private int restrictFlagsForCaller(int flags, @NonNull String callingPackage) {
+    private int restrictFlagsForCaller(int flags, @Nullable String callingPackage) {
         // All non-privileged callers are not allowed to turn off POLL_ON_OPEN.
         final boolean isPrivileged = PermissionUtils.checkAnyPermissionOf(mContext,
                 NetworkStack.PERMISSION_MAINLINE_NETWORK_STACK,
@@ -1365,7 +1479,8 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         return flags;
     }
 
-    private INetworkStatsSession openSessionInternal(final int flags, final String callingPackage) {
+    private INetworkStatsSession openSessionInternal(
+            final int flags, @Nullable final String callingPackage) {
         final int restrictedFlags = restrictFlagsForCaller(flags, callingPackage);
         if ((restrictedFlags & (NetworkStatsManager.FLAG_POLL_ON_OPEN
                 | NetworkStatsManager.FLAG_POLL_FORCE)) != 0) {
@@ -1382,6 +1497,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
         return new INetworkStatsSession.Stub() {
             private final int mCallingUid = Binder.getCallingUid();
+            @Nullable
             private final String mCallingPackage = callingPackage;
             private final @NetworkStatsAccess.Level int mAccessLevel = checkAccessLevel(
                     callingPackage);
@@ -1520,7 +1636,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
     }
 
     private void enforceTemplatePermissions(@NonNull NetworkTemplate template,
-            @NonNull String callingPackage) {
+            @Nullable String callingPackage) {
         // For a template with wifi network keys, it is possible for a malicious
         // client to track the user locations via querying data usage. Thus, enforce
         // fine location permission check.
@@ -1541,7 +1657,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         }
     }
 
-    private @NetworkStatsAccess.Level int checkAccessLevel(String callingPackage) {
+    private @NetworkStatsAccess.Level int checkAccessLevel(@Nullable String callingPackage) {
         return NetworkStatsAccess.checkAccessLevel(
                 mContext, Binder.getCallingPid(), Binder.getCallingUid(), callingPackage);
     }
@@ -1868,36 +1984,56 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         if (callingUid != android.os.Process.SYSTEM_UID && callingUid != uid) {
             return UNSUPPORTED;
         }
-        return nativeGetUidStat(uid, type);
+        return getEntryValueForType(nativeGetUidStat(uid), type);
     }
 
     @Override
     public long getIfaceStats(@NonNull String iface, int type) {
         Objects.requireNonNull(iface);
-        long nativeIfaceStats = nativeGetIfaceStat(iface, type);
-        if (nativeIfaceStats == -1) {
-            return nativeIfaceStats;
+        final NetworkStats.Entry entry = nativeGetIfaceStat(iface);
+        final long value = getEntryValueForType(entry, type);
+        if (value == UNSUPPORTED) {
+            return UNSUPPORTED;
         } else {
             // When tethering offload is in use, nativeIfaceStats does not contain usage from
             // offload, add it back here. Note that the included statistics might be stale
             // since polling newest stats from hardware might impact system health and not
             // suitable for TrafficStats API use cases.
-            return nativeIfaceStats + getProviderIfaceStats(iface, type);
+            entry.add(getProviderIfaceStats(iface));
+            return getEntryValueForType(entry, type);
+        }
+    }
+
+    private long getEntryValueForType(@Nullable NetworkStats.Entry entry, int type) {
+        if (entry == null) return UNSUPPORTED;
+        switch (type) {
+            case TrafficStats.TYPE_RX_BYTES:
+                return entry.rxBytes;
+            case TrafficStats.TYPE_TX_BYTES:
+                return entry.txBytes;
+            case TrafficStats.TYPE_RX_PACKETS:
+                return entry.rxPackets;
+            case TrafficStats.TYPE_TX_PACKETS:
+                return entry.txPackets;
+            default:
+                return UNSUPPORTED;
         }
     }
 
     @Override
     public long getTotalStats(int type) {
-        long nativeTotalStats = nativeGetTotalStat(type);
-        if (nativeTotalStats == -1) {
-            return nativeTotalStats;
+        final NetworkStats.Entry entry = nativeGetTotalStat();
+        final long value = getEntryValueForType(entry, type);
+        if (value == UNSUPPORTED) {
+            return UNSUPPORTED;
         } else {
             // Refer to comment in getIfaceStats
-            return nativeTotalStats + getProviderIfaceStats(IFACE_ALL, type);
+            entry.add(getProviderIfaceStats(IFACE_ALL));
+            return getEntryValueForType(entry, type);
         }
     }
 
-    private long getProviderIfaceStats(@Nullable String iface, int type) {
+    private NetworkStats.Entry getProviderIfaceStats(@Nullable String iface) {
         final NetworkStats providerSnapshot = getNetworkStatsFromProviders(STATS_PER_IFACE);
         final HashSet<String> limitIfaces;
         if (iface == IFACE_ALL) {
@@ -1906,19 +2042,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
             limitIfaces = new HashSet<>();
             limitIfaces.add(iface);
         }
-        final NetworkStats.Entry entry = providerSnapshot.getTotal(null, limitIfaces);
-        switch (type) {
-            case TrafficStats.TYPE_RX_BYTES:
-                return entry.rxBytes;
-            case TrafficStats.TYPE_RX_PACKETS:
-                return entry.rxPackets;
-            case TrafficStats.TYPE_TX_BYTES:
-                return entry.txBytes;
-            case TrafficStats.TYPE_TX_PACKETS:
-                return entry.txPackets;
-            default:
-                return 0;
-        }
+        return providerSnapshot.getTotal(null, limitIfaces);
     }
 
     /**
@@ -2639,6 +2763,17 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
                 }
             }
             pw.println(CONFIG_ENABLE_NETWORK_STATS_EVENT_LOGGER + ": " + mSupportEventLogger);
+            pw.print(NETSTATS_FASTDATAINPUT_TARGET_ATTEMPTS,
+                    mDeps.getUseFastDataInputTargetAttempts());
+            pw.println();
+            try {
+                pw.print("FastDataInput successes", mFastDataInputSuccessesCounter.get());
+                pw.println();
+                pw.print("FastDataInput fallbacks", mFastDataInputFallbacksCounter.get());
+                pw.println();
+            } catch (IOException e) {
+                pw.println("(failed to dump FastDataInput counters)");
+            }
 
             pw.decreaseIndent();
 
@@ -3274,10 +3409,13 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         }
     }
 
-    private static native long nativeGetTotalStat(int type);
-    private static native long nativeGetIfaceStat(String iface, int type);
-    private static native long nativeGetIfIndexStat(int ifindex, int type);
-    private static native long nativeGetUidStat(int uid, int type);
+    // TODO: Read stats by using BpfNetMapsReader.
+    @Nullable
+    private static native NetworkStats.Entry nativeGetTotalStat();
+    @Nullable
+    private static native NetworkStats.Entry nativeGetIfaceStat(String iface);
+    @Nullable
+    private static native NetworkStats.Entry nativeGetUidStat(int uid);
 
     /** Initializes and registers the Perfetto Network Trace data source */
     public static native void nativeInitNetworkTracing();
