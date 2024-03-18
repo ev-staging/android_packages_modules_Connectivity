@@ -15,6 +15,7 @@
 //
 
 package {
+    default_team: "trendy_team_fwk_core_networking",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -81,6 +82,9 @@ java_defaults {
         "framework-tethering.impl",
     ],
     manifest: "AndroidManifestBase.xml",
+    lint: {
+        error_checks: ["NewApi"],
+    },
 }
 
 // build tethering static library, used to compile both variants of the tethering.
