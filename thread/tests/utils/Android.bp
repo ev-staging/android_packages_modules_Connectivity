@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2024 The Android Open Source Project
+// Copyright (C) 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,10 +14,24 @@
 // limitations under the License.
 //
 
-aconfig_declarations {
-    name: "com.android.net.thread.flags-aconfig",
-    package: "com.android.net.thread.flags",
-    container: "system",
-    srcs: ["thread_base.aconfig"],
-    visibility: ["//packages/modules/Connectivity:__subpackages__"],
+package {
+    default_team: "trendy_team_fwk_thread_network",
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+java_library {
+    name: "ThreadNetworkTestUtils",
+    min_sdk_version: "30",
+    static_libs: [
+        "compatibility-device-util-axt",
+        "net-tests-utils",
+        "net-utils-device-common",
+        "net-utils-device-common-bpf",
+    ],
+    srcs: [
+        "src/**/*.java",
+    ],
+    defaults: [
+        "framework-connectivity-test-defaults",
+    ],
 }
