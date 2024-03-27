@@ -1978,10 +1978,6 @@ public class ConnectivityService extends IConnectivityManager.Stub
             activityManager.registerUidFrozenStateChangedCallback(
                     (Runnable r) -> r.run(), frozenStateChangedCallback);
         }
-
-        if (mDeps.isFeatureNotChickenedOut(mContext, LOG_BPF_RC)) {
-            mHandler.post(BpfLoaderRcUtils::checkBpfLoaderRc);
-        }
     }
 
     /**
@@ -2611,7 +2607,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
                 // Not the system, so it's an app requesting on its own behalf.
                 type = RequestType.RT_APP.getNumber();
             }
-            countPerType.put(type, countPerType.get(type, 0));
+            countPerType.put(type, countPerType.get(type, 0) + 1);
         }
         for (int i = countPerType.size() - 1; i >= 0; --i) {
             final RequestCountForType.Builder r = RequestCountForType.newBuilder();
@@ -3435,8 +3431,6 @@ public class ConnectivityService extends IConnectivityManager.Stub
     @VisibleForTesting
     public static final String ALLOW_SYSUI_CONNECTIVITY_REPORTS =
             "allow_sysui_connectivity_reports";
-
-    public static final String LOG_BPF_RC = "log_bpf_rc_force_disable";
 
     public static final String ALLOW_SATALLITE_NETWORK_FALLBACK =
             "allow_satallite_network_fallback";
