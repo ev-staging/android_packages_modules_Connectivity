@@ -20,6 +20,7 @@ import static android.net.nsd.NsdManager.PROTOCOL_DNS_SD;
 
 import android.annotation.NonNull;
 import android.content.Context;
+import android.net.InetAddresses;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.os.Handler;
@@ -33,6 +34,7 @@ import com.android.server.thread.openthread.DnsTxtAttribute;
 import com.android.server.thread.openthread.INsdPublisher;
 import com.android.server.thread.openthread.INsdStatusReceiver;
 
+import java.net.InetAddress;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -119,6 +121,30 @@ public final class NsdPublisher extends INsdPublisher.Stub {
         return serviceInfo;
     }
 
+    @Override
+    public void registerHost(
+            String name, List<String> addresses, INsdStatusReceiver receiver, int listenerId) {
+        postRegistrationJob(
+                () -> {
+                    NsdServiceInfo serviceInfo = buildServiceInfoForHost(name, addresses);
+                    registerInternal(serviceInfo, receiver, listenerId, "host");
+                });
+    }
+
+    private static NsdServiceInfo buildServiceInfoForHost(
+            String name, List<String> addressStrings) {
+        NsdServiceInfo serviceInfo = new NsdServiceInfo();
+
+        serviceInfo.setHostname(name);
+        ArrayList<InetAddress> addresses = new ArrayList<>(addressStrings.size());
+        for (String addressString : addressStrings) {
+            addresses.add(InetAddresses.parseNumericAddress(addressString));
+        }
+        serviceInfo.setHostAddresses(addresses);
+
+        return serviceInfo;
+    }
+
     private void registerInternal(
             NsdServiceInfo serviceInfo,
             INsdStatusReceiver receiver,
@@ -178,8 +204,12 @@ public final class NsdPublisher extends INsdPublisher.Stub {
         }
     }
 
-    /** On ot-daemon died, unregister all registrations. */
-    public void onOtDaemonDied() {
+    @Override
+    public void reset() {
+        mHandler.post(this::resetInternal);
+    }
+
+    private void resetInternal() {
         checkOnHandlerThread();
         for (int i = 0; i < mRegistrationListeners.size(); ++i) {
             try {
@@ -196,6 +226,12 @@ public final class NsdPublisher extends INsdPublisher.Stub {
             }
         }
         mRegistrationListeners.clear();
+        mRegistrationJobs.clear();
+    }
+
+    /** On ot-daemon died, reset. */
+    public void onOtDaemonDied() {
+        reset();
     }
 
     // TODO: b/323300118 - Remove this mechanism when the race condition in NsdManager is fixed.
