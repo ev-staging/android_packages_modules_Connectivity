@@ -25,6 +25,7 @@ import static android.net.thread.ThreadNetworkException.ERROR_THREAD_DISABLED;
 import static android.net.thread.ThreadNetworkManager.DISALLOW_THREAD_NETWORK;
 import static android.net.thread.ThreadNetworkManager.PERMISSION_THREAD_NETWORK_PRIVILEGED;
 
+import static com.android.server.thread.ThreadNetworkCountryCode.DEFAULT_COUNTRY_CODE;
 import static com.android.server.thread.openthread.IOtDaemon.ErrorCode.OT_ERROR_INVALID_STATE;
 
 import static com.google.common.io.BaseEncoding.base16;
@@ -78,7 +79,9 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 
 import java.util.concurrent.CompletableFuture;
@@ -112,7 +115,11 @@ public final class ThreadNetworkControllerServiceTest {
     private static final String DEFAULT_NETWORK_NAME = "thread-wpan0";
     private static final int OT_ERROR_NONE = 0;
     private static final int DEFAULT_SUPPORTED_CHANNEL_MASK = 0x07FFF800; // from channel 11 to 26
-    private static final int DEFAULT_PREFERRED_CHANNEL_MASK = 0x00000800; // channel 11
+
+    // The DEFAULT_PREFERRED_CHANNEL_MASK is the ot-daemon preferred channel mask. Channel 25 and
+    // 26 are not preferred by dataset. The ThreadNetworkControllerService will only select channel
+    // 11 when it creates randomized dataset.
+    private static final int DEFAULT_PREFERRED_CHANNEL_MASK = 0x06000800; // channel 11, 25 and 26
     private static final int DEFAULT_SELECTED_CHANNEL = 11;
     private static final byte[] DEFAULT_SUPPORTED_CHANNEL_MASK_ARRAY = base16().decode("001FFFE0");
 
@@ -180,7 +187,8 @@ public final class ThreadNetworkControllerServiceTest {
                         mMockPersistentSettings,
                         mMockNsdPublisher,
                         mMockUserManager,
-                        mConnectivityResources);
+                        mConnectivityResources,
+                        () -> DEFAULT_COUNTRY_CODE);
         mService.setTestNetworkAgent(mMockNetworkAgent);
     }
 
@@ -488,5 +496,24 @@ public final class ThreadNetworkControllerServiceTest {
         verify(mockReceiver, times(1)).onSuccess();
         assertThat(mFakeOtDaemon.isInitialized()).isTrue();
         verify(mockJoinReceiver, times(1)).onSuccess();
+    }
+
+    @Test
+    public void onOtDaemonDied_joinedNetwork_interfaceStateBackToUp() throws Exception {
+        mService.initialize();
+        final IOperationReceiver mockReceiver = mock(IOperationReceiver.class);
+        mService.join(DEFAULT_ACTIVE_DATASET, mockReceiver);
+        mTestLooper.dispatchAll();
+        mTestLooper.moveTimeForward(FakeOtDaemon.JOIN_DELAY.toMillis() + 100);
+        mTestLooper.dispatchAll();
+
+        Mockito.reset(mMockInfraIfController);
+        mFakeOtDaemon.terminate();
+        mTestLooper.dispatchAll();
+
+        verify(mMockTunIfController, times(1)).onOtDaemonDied();
+        InOrder inOrder = Mockito.inOrder(mMockTunIfController);
+        inOrder.verify(mMockTunIfController, times(1)).setInterfaceUp(false);
+        inOrder.verify(mMockTunIfController, times(1)).setInterfaceUp(true);
     }
 }
