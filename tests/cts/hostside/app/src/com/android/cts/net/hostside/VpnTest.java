@@ -124,6 +124,7 @@ import com.android.net.module.util.ArrayTrackRecord;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.PacketBuilder;
 import com.android.testutils.AutoReleaseNetworkCallbackRule;
+import com.android.testutils.ConnectUtil;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
 import com.android.testutils.RecorderCallback;
@@ -221,6 +222,7 @@ public class VpnTest {
     private WifiManager mWifiManager;
     private RemoteSocketFactoryClient mRemoteSocketFactoryClient;
     private CtsNetUtils mCtsNetUtils;
+    private ConnectUtil mConnectUtil;
     private PackageManager mPackageManager;
     private Context mTestContext;
     private Context mTargetContext;
@@ -270,6 +272,7 @@ public class VpnTest {
         mRemoteSocketFactoryClient.bind();
         mDevice.waitForIdle();
         mCtsNetUtils = new CtsNetUtils(mTestContext);
+        mConnectUtil = new ConnectUtil(mTestContext);
         mPackageManager = mTestContext.getPackageManager();
         assumeTrue(supportedHardware());
     }
@@ -893,7 +896,7 @@ public class VpnTest {
         final boolean isWifiEnabled = mWifiManager.isWifiEnabled();
         testAndCleanup(() -> {
             // Ensure both of wifi and mobile data are connected.
-            final Network wifiNetwork = mCtsNetUtils.ensureWifiConnected();
+            final Network wifiNetwork = mConnectUtil.ensureWifiValidated();
             final Network cellNetwork = mNetworkCallbackRule.requestCell();
             // Store current default network.
             final Network defaultNetwork = mCM.getActiveNetwork();
@@ -1940,7 +1943,7 @@ public class VpnTest {
                 .build();
         final CtsNetUtils.TestNetworkCallback callback = new CtsNetUtils.TestNetworkCallback();
         mCM.requestNetwork(request, callback);
-        final FileDescriptor srcTunFd = runWithShellPermissionIdentity(() -> {
+        final ParcelFileDescriptor srcTunFd = runWithShellPermissionIdentity(() -> {
             final TestNetworkManager tnm = mTestContext.getSystemService(TestNetworkManager.class);
             List<LinkAddress> linkAddresses = duplicatedAddress
                     ? List.of(new LinkAddress("192.0.2.2/24"),
@@ -1949,7 +1952,7 @@ public class VpnTest {
                             new LinkAddress("2001:db8:3:4::ffe/64"));
             final TestNetworkInterface iface = tnm.createTunInterface(linkAddresses);
             tnm.setupTestNetwork(iface.getInterfaceName(), new Binder());
-            return iface.getFileDescriptor().getFileDescriptor();
+            return iface.getFileDescriptor();
         }, MANAGE_TEST_NETWORKS);
         final Network testNetwork = callback.waitForAvailable();
         assertNotNull(testNetwork);
@@ -1963,11 +1966,11 @@ public class VpnTest {
                     false /* isAlwaysMetered */);
 
             final FileDescriptor dstUdpFd = dstSock.getFileDescriptor$();
-            checkBlockUdp(srcTunFd, dstUdpFd,
+            checkBlockUdp(srcTunFd.getFileDescriptor(), dstUdpFd,
                     InetAddresses.parseNumericAddress("192.0.2.2") /* dstAddress */,
                     InetAddresses.parseNumericAddress("192.0.2.1") /* srcAddress */,
                     duplicatedAddress ? EXPECT_PASS : EXPECT_BLOCK);
-            checkBlockUdp(srcTunFd, dstUdpFd,
+            checkBlockUdp(srcTunFd.getFileDescriptor(), dstUdpFd,
                     InetAddresses.parseNumericAddress("2001:db8:1:2::ffe") /* dstAddress */,
                     InetAddresses.parseNumericAddress("2001:db8:1:2::ffa") /* srcAddress */,
                     duplicatedAddress ? EXPECT_PASS : EXPECT_BLOCK);
@@ -1975,7 +1978,7 @@ public class VpnTest {
             // Traffic on VPN should not be affected
             checkTrafficOnVpn();
         }, /* cleanup */ () -> {
-                Os.close(srcTunFd);
+                srcTunFd.close();
                 dstSock.close();
             }, /* cleanup */ () -> {
                 runWithShellPermissionIdentity(() -> {
