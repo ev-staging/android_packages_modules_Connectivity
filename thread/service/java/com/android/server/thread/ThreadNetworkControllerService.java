@@ -105,6 +105,7 @@ import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import android.os.UserManager;
 import android.provider.Settings;
 import android.util.Log;
@@ -131,6 +132,8 @@ import java.io.IOException;
 import java.net.Inet6Address;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -465,6 +468,7 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
 
     private void setEnabledInternal(
             boolean isEnabled, boolean persist, @NonNull OperationReceiverWrapper receiver) {
+        checkOnHandlerThread();
         if (isEnabled && isThreadUserRestricted()) {
             receiver.onError(
                     ERROR_FAILED_PRECONDITION,
@@ -820,7 +824,6 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
                                 networkName,
                                 supportedChannelMask,
                                 preferredChannelMask,
-                                Instant.now(),
                                 new Random(),
                                 new SecureRandom());
 
@@ -838,9 +841,18 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
             String networkName,
             int supportedChannelMask,
             int preferredChannelMask,
-            Instant now,
             Random random,
             SecureRandom secureRandom) {
+        boolean authoritative = false;
+        Instant now = Instant.now();
+        try {
+            Clock clock = SystemClock.currentNetworkTimeClock();
+            now = clock.instant();
+            authoritative = true;
+        } catch (DateTimeException e) {
+            Log.w(TAG, "Failed to get authoritative time", e);
+        }
+
         int panId = random.nextInt(/* bound= */ 0xffff);
         final byte[] meshLocalPrefix = newRandomBytes(random, LENGTH_MESH_LOCAL_PREFIX_BITS / 8);
         meshLocalPrefix[0] = MESH_LOCAL_PREFIX_FIRST_BYTE;
@@ -854,7 +866,7 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
         return new ActiveOperationalDataset.Builder()
                 .setActiveTimestamp(
                         new OperationalDatasetTimestamp(
-                                now.getEpochSecond() & 0xffffffffffffL, 0, false))
+                                now.getEpochSecond() & 0xffffffffffffL, 0, authoritative))
                 .setExtendedPanId(newRandomBytes(random, LENGTH_EXTENDED_PAN_ID))
                 .setPanId(panId)
                 .setNetworkName(networkName)
@@ -960,7 +972,11 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
 
     private void checkOnHandlerThread() {
         if (Looper.myLooper() != mHandler.getLooper()) {
-            Log.wtf(TAG, "Must be on the handler thread!");
+            throw new IllegalStateException(
+                    "Not running on ThreadNetworkControllerService thread ("
+                            + mHandler.getLooper()
+                            + ") : "
+                            + Looper.myLooper());
         }
     }
 
@@ -1058,7 +1074,7 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
     }
 
     @Override
-    public void leave(@NonNull IOperationReceiver receiver) throws RemoteException {
+    public void leave(@NonNull IOperationReceiver receiver) {
         enforceAllPermissionsGranted(PERMISSION_THREAD_NETWORK_PRIVILEGED);
 
         mHandler.post(() -> leaveInternal(new OperationReceiverWrapper(receiver)));
