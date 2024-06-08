@@ -163,7 +163,6 @@ import static android.telephony.DataConnectionRealTimeInfo.DC_POWER_STATE_HIGH;
 import static android.telephony.DataConnectionRealTimeInfo.DC_POWER_STATE_LOW;
 
 import static com.android.server.ConnectivityService.ALLOW_SATALLITE_NETWORK_FALLBACK;
-import static com.android.server.ConnectivityService.DELAY_DESTROY_FROZEN_SOCKETS_VERSION;
 import static com.android.net.module.util.DeviceConfigUtils.TETHERING_MODULE_NAME;
 import static com.android.server.ConnectivityService.ALLOW_SYSUI_CONNECTIVITY_REPORTS;
 import static com.android.server.ConnectivityService.KEY_DESTROY_FROZEN_SOCKETS_VERSION;
@@ -178,6 +177,7 @@ import static com.android.server.ConnectivityServiceTestUtils.transportToLegacyT
 import static com.android.server.NetworkAgentWrapper.CallbackType.OnQosCallbackRegister;
 import static com.android.server.NetworkAgentWrapper.CallbackType.OnQosCallbackUnregister;
 import static com.android.server.connectivity.ConnectivityFlags.BACKGROUND_FIREWALL_CHAIN;
+import static com.android.server.connectivity.ConnectivityFlags.DELAY_DESTROY_SOCKETS;
 import static com.android.server.connectivity.ConnectivityFlags.INGRESS_TO_VPN_ADDRESS_FILTERING;
 import static com.android.testutils.Cleanup.testAndCleanup;
 import static com.android.testutils.ConcurrentUtils.await;
@@ -1746,7 +1746,15 @@ public class ConnectivityServiceTest {
 
     private void setBlockedReasonChanged(int blockedReasons) {
         mBlockedReasons = blockedReasons;
-        mPolicyCallback.onUidBlockedReasonChanged(Process.myUid(), blockedReasons);
+        if (mDeps.isAtLeastV()) {
+            visibleOnHandlerThread(mCsHandlerThread.getThreadHandler(),
+                    () -> mService.handleBlockedReasonsChanged(
+                            List.of(new Pair<>(Process.myUid(), blockedReasons))
+
+                    ));
+        } else {
+            mPolicyCallback.onUidBlockedReasonChanged(Process.myUid(), blockedReasons);
+        }
     }
 
     private Nat464Xlat getNat464Xlat(NetworkAgentWrapper mna) {
@@ -1927,11 +1935,16 @@ public class ConnectivityServiceTest {
         mService.mLingerDelayMs = TEST_LINGER_DELAY_MS;
         mService.mNascentDelayMs = TEST_NASCENT_DELAY_MS;
 
-        final ArgumentCaptor<NetworkPolicyCallback> policyCallbackCaptor =
-                ArgumentCaptor.forClass(NetworkPolicyCallback.class);
-        verify(mNetworkPolicyManager).registerNetworkPolicyCallback(any(),
-                policyCallbackCaptor.capture());
-        mPolicyCallback = policyCallbackCaptor.getValue();
+        if (mDeps.isAtLeastV()) {
+            verify(mNetworkPolicyManager, never()).registerNetworkPolicyCallback(any(), any());
+            mPolicyCallback = null;
+        } else {
+            final ArgumentCaptor<NetworkPolicyCallback> policyCallbackCaptor =
+                    ArgumentCaptor.forClass(NetworkPolicyCallback.class);
+            verify(mNetworkPolicyManager).registerNetworkPolicyCallback(any(),
+                    policyCallbackCaptor.capture());
+            mPolicyCallback = policyCallbackCaptor.getValue();
+        }
 
         // Create local CM before sending system ready so that we can answer
         // getSystemService() correctly.
@@ -2169,8 +2182,6 @@ public class ConnectivityServiceTest {
                     return true;
                 case KEY_DESTROY_FROZEN_SOCKETS_VERSION:
                     return true;
-                case DELAY_DESTROY_FROZEN_SOCKETS_VERSION:
-                    return true;
                 default:
                     return super.isFeatureEnabled(context, name);
             }
@@ -2186,6 +2197,8 @@ public class ConnectivityServiceTest {
                 case INGRESS_TO_VPN_ADDRESS_FILTERING:
                     return true;
                 case BACKGROUND_FIREWALL_CHAIN:
+                    return true;
+                case DELAY_DESTROY_SOCKETS:
                     return true;
                 default:
                     return super.isFeatureNotChickenedOut(context, name);
@@ -7527,13 +7540,13 @@ public class ConnectivityServiceTest {
     @Test
     public void testNetworkCallbackMaximum() throws Exception {
         final int MAX_REQUESTS = 100;
-        final int CALLBACKS = 87;
+        final int CALLBACKS = 88;
         final int DIFF_INTENTS = 10;
         final int SAME_INTENTS = 10;
         final int SYSTEM_ONLY_MAX_REQUESTS = 250;
-        // Assert 1 (Default request filed before testing) + CALLBACKS + DIFF_INTENTS +
-        // 1 (same intent) = MAX_REQUESTS - 1, since the capacity is MAX_REQUEST - 1.
-        assertEquals(MAX_REQUESTS - 1, 1 + CALLBACKS + DIFF_INTENTS + 1);
+        // CALLBACKS + DIFF_INTENTS + 1 (same intent)
+        // = MAX_REQUESTS - 1, since the capacity is MAX_REQUEST - 1.
+        assertEquals(MAX_REQUESTS - 1, CALLBACKS + DIFF_INTENTS + 1);
 
         NetworkRequest networkRequest = new NetworkRequest.Builder().build();
         ArrayList<Object> registered = new ArrayList<>();
