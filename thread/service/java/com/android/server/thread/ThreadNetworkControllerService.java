@@ -61,6 +61,8 @@ import static com.android.server.thread.openthread.IOtDaemon.OT_STATE_DISABLING;
 import static com.android.server.thread.openthread.IOtDaemon.OT_STATE_ENABLED;
 import static com.android.server.thread.openthread.IOtDaemon.TUN_IF_NAME;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import android.Manifest.permission;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
@@ -105,6 +107,7 @@ import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import android.os.UserManager;
 import android.provider.Settings;
 import android.util.Log;
@@ -116,6 +119,7 @@ import com.android.server.ServiceManagerWrapper;
 import com.android.server.connectivity.ConnectivityResources;
 import com.android.server.thread.openthread.BackboneRouterState;
 import com.android.server.thread.openthread.BorderRouterConfigurationParcel;
+import com.android.server.thread.openthread.DnsTxtAttribute;
 import com.android.server.thread.openthread.IChannelMasksReceiver;
 import com.android.server.thread.openthread.IOtDaemon;
 import com.android.server.thread.openthread.IOtDaemonCallback;
@@ -129,8 +133,9 @@ import libcore.util.HexEncoding;
 
 import java.io.IOException;
 import java.net.Inet6Address;
-import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -335,9 +340,11 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
         final String modelName = resources.getString(R.string.config_thread_model_name);
         final String vendorName = resources.getString(R.string.config_thread_vendor_name);
         final String vendorOui = resources.getString(R.string.config_thread_vendor_oui);
+        final boolean managedByGoogle =
+                resources.getBoolean(R.bool.config_thread_managed_by_google_home);
 
         if (!modelName.isEmpty()) {
-            if (modelName.getBytes(StandardCharsets.UTF_8).length > MAX_MODEL_NAME_UTF8_BYTES) {
+            if (modelName.getBytes(UTF_8).length > MAX_MODEL_NAME_UTF8_BYTES) {
                 throw new IllegalStateException(
                         "Model name is longer than "
                                 + MAX_MODEL_NAME_UTF8_BYTES
@@ -347,7 +354,7 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
         }
 
         if (!vendorName.isEmpty()) {
-            if (vendorName.getBytes(StandardCharsets.UTF_8).length > MAX_VENDOR_NAME_UTF8_BYTES) {
+            if (vendorName.getBytes(UTF_8).length > MAX_VENDOR_NAME_UTF8_BYTES) {
                 throw new IllegalStateException(
                         "Vendor name is longer than "
                                 + MAX_VENDOR_NAME_UTF8_BYTES
@@ -364,7 +371,19 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
         meshcopTxts.modelName = modelName;
         meshcopTxts.vendorName = vendorName;
         meshcopTxts.vendorOui = HexEncoding.decode(vendorOui.replace("-", "").replace(":", ""));
+        meshcopTxts.nonStandardTxtEntries = List.of(makeManagedByGoogleTxtAttr(managedByGoogle));
+
         return meshcopTxts;
+    }
+
+    /**
+     * Creates a DNS-SD TXT entry for indicating whether Thread on this device is managed by Google.
+     *
+     * @return TXT entry "vgh=1" if {@code managedByGoogle} is {@code true}; otherwise, "vgh=0"
+     */
+    private static DnsTxtAttribute makeManagedByGoogleTxtAttr(boolean managedByGoogle) {
+        final byte[] value = (managedByGoogle ? "1" : "0").getBytes(UTF_8);
+        return new DnsTxtAttribute("vgh", value);
     }
 
     private void onOtDaemonDied() {
@@ -465,6 +484,7 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
 
     private void setEnabledInternal(
             boolean isEnabled, boolean persist, @NonNull OperationReceiverWrapper receiver) {
+        checkOnHandlerThread();
         if (isEnabled && isThreadUserRestricted()) {
             receiver.onError(
                     ERROR_FAILED_PRECONDITION,
@@ -619,7 +639,10 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
 
         return !mForceStopOtDaemonEnabled
                 && !mUserRestricted
-                && (!mAirplaneModeOn || enabledInAirplaneMode)
+                // FIXME(b/340744397): Note that here we need to call `isAirplaneModeOn()` to get
+                // the latest state of airplane mode but can't use `mIsAirplaneMode`. This is for
+                // avoiding the race conditions described in b/340744397
+                && (!isAirplaneModeOn() || enabledInAirplaneMode)
                 && mPersistentSettings.get(ThreadPersistentSettings.THREAD_ENABLED);
     }
 
@@ -710,6 +733,7 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
                 if (mNetworkToInterface.containsKey(mUpstreamNetwork)) {
                     enableBorderRouting(mNetworkToInterface.get(mUpstreamNetwork));
                 }
+                mNsdPublisher.setNetworkForHostResolution(mUpstreamNetwork);
             }
         }
     }
@@ -820,7 +844,6 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
                                 networkName,
                                 supportedChannelMask,
                                 preferredChannelMask,
-                                Instant.now(),
                                 new Random(),
                                 new SecureRandom());
 
@@ -838,9 +861,18 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
             String networkName,
             int supportedChannelMask,
             int preferredChannelMask,
-            Instant now,
             Random random,
             SecureRandom secureRandom) {
+        boolean authoritative = false;
+        Instant now = Instant.now();
+        try {
+            Clock clock = SystemClock.currentNetworkTimeClock();
+            now = clock.instant();
+            authoritative = true;
+        } catch (DateTimeException e) {
+            Log.w(TAG, "Failed to get authoritative time", e);
+        }
+
         int panId = random.nextInt(/* bound= */ 0xffff);
         final byte[] meshLocalPrefix = newRandomBytes(random, LENGTH_MESH_LOCAL_PREFIX_BITS / 8);
         meshLocalPrefix[0] = MESH_LOCAL_PREFIX_FIRST_BYTE;
@@ -854,7 +886,7 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
         return new ActiveOperationalDataset.Builder()
                 .setActiveTimestamp(
                         new OperationalDatasetTimestamp(
-                                now.getEpochSecond() & 0xffffffffffffL, 0, false))
+                                now.getEpochSecond() & 0xffffffffffffL, 0, authoritative))
                 .setExtendedPanId(newRandomBytes(random, LENGTH_EXTENDED_PAN_ID))
                 .setPanId(panId)
                 .setNetworkName(networkName)
@@ -960,7 +992,11 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
 
     private void checkOnHandlerThread() {
         if (Looper.myLooper() != mHandler.getLooper()) {
-            Log.wtf(TAG, "Must be on the handler thread!");
+            throw new IllegalStateException(
+                    "Not running on ThreadNetworkControllerService thread ("
+                            + mHandler.getLooper()
+                            + ") : "
+                            + Looper.myLooper());
         }
     }
 
@@ -1058,7 +1094,7 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
     }
 
     @Override
-    public void leave(@NonNull IOperationReceiver receiver) throws RemoteException {
+    public void leave(@NonNull IOperationReceiver receiver) {
         enforceAllPermissionsGranted(PERMISSION_THREAD_NETWORK_PRIVILEGED);
 
         mHandler.post(() -> leaveInternal(new OperationReceiverWrapper(receiver)));
@@ -1368,14 +1404,6 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
             }
         }
 
-        private void notifyThreadEnabledUpdated(IStateCallback callback, int enabledState) {
-            try {
-                callback.onThreadEnableStateChanged(enabledState);
-            } catch (RemoteException ignored) {
-                // do nothing if the client is dead
-            }
-        }
-
         public void unregisterStateCallback(IStateCallback callback) {
             checkOnHandlerThread();
             if (!mStateCallbacks.containsKey(callback)) {
@@ -1442,15 +1470,19 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
             }
         }
 
-        @Override
-        public void onThreadEnabledChanged(int state) {
-            mHandler.post(() -> onThreadEnabledChangedInternal(state));
-        }
-
-        private void onThreadEnabledChangedInternal(int state) {
+        private void onThreadEnabledChanged(int state, long listenerId) {
             checkOnHandlerThread();
-            for (IStateCallback callback : mStateCallbacks.keySet()) {
-                notifyThreadEnabledUpdated(callback, otStateToAndroidState(state));
+            boolean stateChanged = (mState == null || mState.threadEnabled != state);
+
+            for (var callbackEntry : mStateCallbacks.entrySet()) {
+                if (!stateChanged && callbackEntry.getValue().id != listenerId) {
+                    continue;
+                }
+                try {
+                    callbackEntry.getKey().onThreadEnableStateChanged(otStateToAndroidState(state));
+                } catch (RemoteException ignored) {
+                    // do nothing if the client is dead
+                }
             }
         }
 
@@ -1477,6 +1509,7 @@ final class ThreadNetworkControllerService extends IThreadNetworkController.Stub
             onInterfaceStateChanged(newState.isInterfaceUp);
             onDeviceRoleChanged(newState.deviceRole, listenerId);
             onPartitionIdChanged(newState.partitionId, listenerId);
+            onThreadEnabledChanged(newState.threadEnabled, listenerId);
             mState = newState;
 
             ActiveOperationalDataset newActiveDataset;

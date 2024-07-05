@@ -165,32 +165,34 @@ typedef struct {
  * since they are less stable abi/api and may conflict with platform uses of bpf.
  */
 sectionType sectionNameTypes[] = {
-        {"bind4/",         BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET4_BIND},
-        {"bind6/",         BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET6_BIND},
-        {"cgroupskb/",     BPF_PROG_TYPE_CGROUP_SKB,       BPF_ATTACH_TYPE_UNSPEC},
-        {"cgroupsock/",    BPF_PROG_TYPE_CGROUP_SOCK,      BPF_ATTACH_TYPE_UNSPEC},
-        {"connect4/",      BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET4_CONNECT},
-        {"connect6/",      BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET6_CONNECT},
-        {"egress/",        BPF_PROG_TYPE_CGROUP_SKB,       BPF_CGROUP_INET_EGRESS},
-        {"getsockopt/",    BPF_PROG_TYPE_CGROUP_SOCKOPT,   BPF_CGROUP_GETSOCKOPT},
-        {"ingress/",       BPF_PROG_TYPE_CGROUP_SKB,       BPF_CGROUP_INET_INGRESS},
-        {"lwt_in/",        BPF_PROG_TYPE_LWT_IN,           BPF_ATTACH_TYPE_UNSPEC},
-        {"lwt_out/",       BPF_PROG_TYPE_LWT_OUT,          BPF_ATTACH_TYPE_UNSPEC},
-        {"lwt_seg6local/", BPF_PROG_TYPE_LWT_SEG6LOCAL,    BPF_ATTACH_TYPE_UNSPEC},
-        {"lwt_xmit/",      BPF_PROG_TYPE_LWT_XMIT,         BPF_ATTACH_TYPE_UNSPEC},
-        {"postbind4/",     BPF_PROG_TYPE_CGROUP_SOCK,      BPF_CGROUP_INET4_POST_BIND},
-        {"postbind6/",     BPF_PROG_TYPE_CGROUP_SOCK,      BPF_CGROUP_INET6_POST_BIND},
-        {"recvmsg4/",      BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP4_RECVMSG},
-        {"recvmsg6/",      BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP6_RECVMSG},
-        {"schedact/",      BPF_PROG_TYPE_SCHED_ACT,        BPF_ATTACH_TYPE_UNSPEC},
-        {"schedcls/",      BPF_PROG_TYPE_SCHED_CLS,        BPF_ATTACH_TYPE_UNSPEC},
-        {"sendmsg4/",      BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP4_SENDMSG},
-        {"sendmsg6/",      BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP6_SENDMSG},
-        {"setsockopt/",    BPF_PROG_TYPE_CGROUP_SOCKOPT,   BPF_CGROUP_SETSOCKOPT},
-        {"skfilter/",      BPF_PROG_TYPE_SOCKET_FILTER,    BPF_ATTACH_TYPE_UNSPEC},
-        {"sockops/",       BPF_PROG_TYPE_SOCK_OPS,         BPF_CGROUP_SOCK_OPS},
-        {"sysctl",         BPF_PROG_TYPE_CGROUP_SYSCTL,    BPF_CGROUP_SYSCTL},
-        {"xdp/",           BPF_PROG_TYPE_XDP,              BPF_ATTACH_TYPE_UNSPEC},
+        {"bind4/",             BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET4_BIND},
+        {"bind6/",             BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET6_BIND},
+        {"cgroupskb/",         BPF_PROG_TYPE_CGROUP_SKB,       BPF_ATTACH_TYPE_UNSPEC},
+        {"cgroupsock/",        BPF_PROG_TYPE_CGROUP_SOCK,      BPF_ATTACH_TYPE_UNSPEC},
+        {"cgroupsockcreate/",  BPF_PROG_TYPE_CGROUP_SOCK,      BPF_CGROUP_INET_SOCK_CREATE},
+        {"cgroupsockrelease/", BPF_PROG_TYPE_CGROUP_SOCK,      BPF_CGROUP_INET_SOCK_RELEASE},
+        {"connect4/",          BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET4_CONNECT},
+        {"connect6/",          BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET6_CONNECT},
+        {"egress/",            BPF_PROG_TYPE_CGROUP_SKB,       BPF_CGROUP_INET_EGRESS},
+        {"getsockopt/",        BPF_PROG_TYPE_CGROUP_SOCKOPT,   BPF_CGROUP_GETSOCKOPT},
+        {"ingress/",           BPF_PROG_TYPE_CGROUP_SKB,       BPF_CGROUP_INET_INGRESS},
+        {"lwt_in/",            BPF_PROG_TYPE_LWT_IN,           BPF_ATTACH_TYPE_UNSPEC},
+        {"lwt_out/",           BPF_PROG_TYPE_LWT_OUT,          BPF_ATTACH_TYPE_UNSPEC},
+        {"lwt_seg6local/",     BPF_PROG_TYPE_LWT_SEG6LOCAL,    BPF_ATTACH_TYPE_UNSPEC},
+        {"lwt_xmit/",          BPF_PROG_TYPE_LWT_XMIT,         BPF_ATTACH_TYPE_UNSPEC},
+        {"postbind4/",         BPF_PROG_TYPE_CGROUP_SOCK,      BPF_CGROUP_INET4_POST_BIND},
+        {"postbind6/",         BPF_PROG_TYPE_CGROUP_SOCK,      BPF_CGROUP_INET6_POST_BIND},
+        {"recvmsg4/",          BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP4_RECVMSG},
+        {"recvmsg6/",          BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP6_RECVMSG},
+        {"schedact/",          BPF_PROG_TYPE_SCHED_ACT,        BPF_ATTACH_TYPE_UNSPEC},
+        {"schedcls/",          BPF_PROG_TYPE_SCHED_CLS,        BPF_ATTACH_TYPE_UNSPEC},
+        {"sendmsg4/",          BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP4_SENDMSG},
+        {"sendmsg6/",          BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP6_SENDMSG},
+        {"setsockopt/",        BPF_PROG_TYPE_CGROUP_SOCKOPT,   BPF_CGROUP_SETSOCKOPT},
+        {"skfilter/",          BPF_PROG_TYPE_SOCKET_FILTER,    BPF_ATTACH_TYPE_UNSPEC},
+        {"sockops/",           BPF_PROG_TYPE_SOCK_OPS,         BPF_CGROUP_SOCK_OPS},
+        {"sysctl",             BPF_PROG_TYPE_CGROUP_SYSCTL,    BPF_CGROUP_SYSCTL},
+        {"xdp/",               BPF_PROG_TYPE_XDP,              BPF_ATTACH_TYPE_UNSPEC},
 };
 
 typedef struct {
@@ -736,15 +738,15 @@ static int createMaps(const char* elfPath, ifstream& elfFile, vector<unique_fd>&
         domain selinux_context = getDomainFromSelinuxContext(md[i].selinux_context);
         if (specified(selinux_context)) {
             ALOGI("map %s selinux_context [%-32s] -> %d -> '%s' (%s)", mapNames[i].c_str(),
-                  md[i].selinux_context, selinux_context, lookupSelinuxContext(selinux_context),
-                  lookupPinSubdir(selinux_context));
+                  md[i].selinux_context, static_cast<int>(selinux_context),
+                  lookupSelinuxContext(selinux_context), lookupPinSubdir(selinux_context));
         }
 
         domain pin_subdir = getDomainFromPinSubdir(md[i].pin_subdir);
         if (unrecognized(pin_subdir)) return -ENOTDIR;
         if (specified(pin_subdir)) {
             ALOGI("map %s pin_subdir [%-32s] -> %d -> '%s'", mapNames[i].c_str(), md[i].pin_subdir,
-                  pin_subdir, lookupPinSubdir(pin_subdir));
+                  static_cast<int>(pin_subdir), lookupPinSubdir(pin_subdir));
         }
 
         // Format of pin location is /sys/fs/bpf/<pin_subdir|prefix>map_<objName>_<mapName>
@@ -974,13 +976,14 @@ static int loadCodeSections(const char* elfPath, vector<codeSection>& cs, const 
 
         if (specified(selinux_context)) {
             ALOGI("prog %s selinux_context [%-32s] -> %d -> '%s' (%s)", name.c_str(),
-                  cs[i].prog_def->selinux_context, selinux_context,
+                  cs[i].prog_def->selinux_context, static_cast<int>(selinux_context),
                   lookupSelinuxContext(selinux_context), lookupPinSubdir(selinux_context));
         }
 
         if (specified(pin_subdir)) {
             ALOGI("prog %s pin_subdir [%-32s] -> %d -> '%s'", name.c_str(),
-                  cs[i].prog_def->pin_subdir, pin_subdir, lookupPinSubdir(pin_subdir));
+                  cs[i].prog_def->pin_subdir, static_cast<int>(pin_subdir),
+                  lookupPinSubdir(pin_subdir));
         }
 
         // strip any potential $foo suffix
@@ -1121,10 +1124,19 @@ int loadProg(const char* const elfPath, bool* const isCritical, const unsigned i
             readSectionUint("bpfloader_max_ver", elfFile, DEFAULT_BPFLOADER_MAX_VER);
     unsigned int bpfLoaderMinRequiredVer =
             readSectionUint("bpfloader_min_required_ver", elfFile, 0);
+    unsigned int netBpfLoadMinVer =
+            readSectionUint("netbpfload_min_ver", elfFile, 0);
     size_t sizeOfBpfMapDef =
             readSectionUint("size_of_bpf_map_def", elfFile, DEFAULT_SIZEOF_BPF_MAP_DEF);
     size_t sizeOfBpfProgDef =
             readSectionUint("size_of_bpf_prog_def", elfFile, DEFAULT_SIZEOF_BPF_PROG_DEF);
+
+    // temporary hack to enable gentle enablement of mainline NetBpfLoad
+    if (bpfloader_ver < netBpfLoadMinVer) {
+        ALOGI("NetBpfLoad version %d ignoring ELF object %s with netbpfload min ver %d",
+              bpfloader_ver, elfPath, netBpfLoadMinVer);
+        return 0;
+    }
 
     // inclusive lower bound check
     if (bpfloader_ver < bpfLoaderMinVer) {

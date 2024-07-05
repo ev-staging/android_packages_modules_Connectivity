@@ -77,18 +77,6 @@
       "name": "libnetworkstats_test"
     },
     {
-      "name": "NetHttpCoverageTests",
-      "options": [
-        {
-          "exclude-annotation": "com.android.testutils.SkipPresubmit"
-        },
-        {
-          // These sometimes take longer than 1 min which is the presubmit timeout
-          "exclude-annotation": "androidx.test.filters.LargeTest"
-        }
-      ]
-    },
-    {
       "name": "CtsTetheringTestLatestSdk",
       "options": [
         {
@@ -252,19 +240,6 @@
     },
     {
       "name": "FrameworksNetIntegrationTests"
-    },
-    // Runs both NetHttpTests and CtsNetHttpTestCases
-    {
-      "name": "NetHttpCoverageTests",
-      "options": [
-        {
-          "exclude-annotation": "com.android.testutils.SkipPresubmit"
-        },
-        {
-          // These sometimes take longer than 1 min which is the presubmit timeout
-          "exclude-annotation": "androidx.test.filters.LargeTest"
-        }
-      ]
     }
   ],
   "postsubmit": [
@@ -292,9 +267,6 @@
     },
     {
       "name": "FrameworksNetTests"
-    },
-    {
-      "name": "NetHttpCoverageTests"
     }
   ],
   "mainline-presubmit": [
@@ -421,18 +393,6 @@
       "name": "libnetworkstats_test[CaptivePortalLoginGoogle.apk+NetworkStackGoogle.apk+com.google.android.resolv.apex+com.google.android.tethering.apex]"
     },
     {
-      "name": "NetHttpCoverageTests[CaptivePortalLoginGoogle.apk+NetworkStackGoogle.apk+com.google.android.resolv.apex+com.google.android.tethering.apex]",
-      "options": [
-        {
-          "exclude-annotation": "com.android.testutils.SkipPresubmit"
-        },
-        {
-          // These sometimes take longer than 1 min which is the presubmit timeout
-          "exclude-annotation": "androidx.test.filters.LargeTest"
-        }
-      ]
-    },
-    {
       "name": "CtsTetheringTestLatestSdk[CaptivePortalLoginGoogle.apk+NetworkStackGoogle.apk+com.google.android.resolv.apex+com.google.android.tethering.apex]",
       "options": [
         {
@@ -478,6 +438,9 @@
     },
     {
       "path": "packages/modules/CaptivePortalLogin"
+    },
+    {
+      "path": "external/cronet"
     },
     {
       "path": "vendor/xts/gts-tests/hostsidetests/networkstack"
