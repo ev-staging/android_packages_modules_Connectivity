@@ -115,23 +115,27 @@ static Status initPrograms(const char* cg2_path) {
     }
 
     if (modules::sdklevel::IsAtLeastV()) {
-        if (bpf::isAtLeastKernelVersion(5, 15, 0)) {
-            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT4_PROG_PATH,
-                                        cg_fd, BPF_CGROUP_INET4_CONNECT));
-            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT6_PROG_PATH,
-                                        cg_fd, BPF_CGROUP_INET6_CONNECT))    ;
-            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_RECVMSG_PROG_PATH,
-                                        cg_fd, BPF_CGROUP_UDP4_RECVMSG));
-            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_RECVMSG_PROG_PATH,
-                                        cg_fd, BPF_CGROUP_UDP6_RECVMSG));
-            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_SENDMSG_PROG_PATH,
-                                        cg_fd, BPF_CGROUP_UDP4_SENDMSG));
-            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_SENDMSG_PROG_PATH,
-                                        cg_fd, BPF_CGROUP_UDP6_SENDMSG));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT4_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_INET4_CONNECT));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT6_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_INET6_CONNECT));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_RECVMSG_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_UDP4_RECVMSG));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_RECVMSG_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_UDP6_RECVMSG));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_SENDMSG_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_UDP4_SENDMSG));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_SENDMSG_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_UDP6_SENDMSG));
+
+        if (bpf::isAtLeastKernelVersion(5, 4, 0)) {
             RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_GETSOCKOPT_PROG_PATH,
                                         cg_fd, BPF_CGROUP_GETSOCKOPT));
             RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_SETSOCKOPT_PROG_PATH,
                                         cg_fd, BPF_CGROUP_SETSOCKOPT));
+        }
+
+        if (bpf::isAtLeastKernelVersion(5, 10, 0)) {
             RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_INET_RELEASE_PROG_PATH,
                                         cg_fd, BPF_CGROUP_INET_SOCK_RELEASE));
         }
@@ -155,15 +159,19 @@ static Status initPrograms(const char* cg2_path) {
     }
 
     if (modules::sdklevel::IsAtLeastV()) {
-        if (bpf::isAtLeastKernelVersion(5, 15, 0)) {
-            if (bpf::queryProgram(cg_fd, BPF_CGROUP_INET4_CONNECT) <= 0) abort();
-            if (bpf::queryProgram(cg_fd, BPF_CGROUP_INET6_CONNECT) <= 0) abort();
-            if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP4_RECVMSG) <= 0) abort();
-            if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP6_RECVMSG) <= 0) abort();
-            if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP4_SENDMSG) <= 0) abort();
-            if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP6_SENDMSG) <= 0) abort();
+        if (bpf::queryProgram(cg_fd, BPF_CGROUP_INET4_CONNECT) <= 0) abort();
+        if (bpf::queryProgram(cg_fd, BPF_CGROUP_INET6_CONNECT) <= 0) abort();
+        if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP4_RECVMSG) <= 0) abort();
+        if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP6_RECVMSG) <= 0) abort();
+        if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP4_SENDMSG) <= 0) abort();
+        if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP6_SENDMSG) <= 0) abort();
+
+        if (bpf::isAtLeastKernelVersion(5, 4, 0)) {
             if (bpf::queryProgram(cg_fd, BPF_CGROUP_GETSOCKOPT) <= 0) abort();
             if (bpf::queryProgram(cg_fd, BPF_CGROUP_SETSOCKOPT) <= 0) abort();
+        }
+
+        if (bpf::isAtLeastKernelVersion(5, 10, 0)) {
             if (bpf::queryProgram(cg_fd, BPF_CGROUP_INET_SOCK_RELEASE) <= 0) abort();
         }
     }
@@ -258,7 +266,10 @@ static void mapLockTest(void) {
 }
 
 Status BpfHandler::initMaps() {
-    mapLockTest();
+    // bpfLock() requires bpfGetFdMapId which is only available on 4.14+ kernels.
+    if (bpf::isAtLeastKernelVersion(4, 14, 0)) {
+        mapLockTest();
+    }
 
     RETURN_IF_NOT_OK(mStatsMapA.init(STATS_MAP_A_PATH));
     RETURN_IF_NOT_OK(mStatsMapB.init(STATS_MAP_B_PATH));
